@@ -2,6 +2,11 @@
 // - Un dedo: tocar una palabra la asigna/quita del campo activo; arrastrar = recuadro de selección.
 // - Dos dedos: ampliar y mover la imagen. Botones +/− como alternativa.
 
+import { cleanValue, FIELD_TYPES } from './fieldtypes.js';
+
+const DOUBT_CONF = 72; // por debajo, se avisa de «lectura dudosa»
+const LOW_WORD_CONF = 60;
+
 export const FIELD_COLORS = ['#0f766e', '#c2410c', '#7c3aed', '#2563eb', '#be185d', '#15803d', '#a16207', '#0e7490', '#b91c1c', '#4d7c0f'];
 export const RESERVED = ['fecha', 'tipo', 'formato', 'valor', 'nota'];
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -25,7 +30,8 @@ export function validateFieldName(raw, fields) {
 export class FieldPicker {
   /**
    * @param {object} els elementos del DOM
-   * @param {object} opts { getFields(), toast(msg), requestAddField() }
+   * @param {object} opts { getFields(), getType(field), refine(field, indices) → Promise<{text, conf}|null>,
+   *                        toast(msg), requestAddField(), onDone() }
    */
   constructor(els, opts) {
     this.els = els;
@@ -36,6 +42,9 @@ export class FieldPicker {
     this.active = null;
     this.assign = new Map(); // índice de palabra → campo
     this.manual = new Map(); // campo → texto escrito a mano
+    this.refined = new Map(); // campo → { key, text, conf } (relectura de precisión)
+    this.pending = new Set(); // campos que se están releyendo
+    this.refineTimers = new Map();
     // Vista: escala base (encajar) * zoom, desplazamiento en px de pantalla.
     this.view = { base: 1, zoom: 1, tx: 0, ty: 0 };
     this.pointers = new Map();
@@ -52,6 +61,8 @@ export class FieldPicker {
     this.height = height || 1;
     this.assign.clear();
     this.manual.clear();
+    this.refined.clear();
+    this.pending.clear();
     if (!this.fields.includes(this.active)) this.active = this.fields[0] || null;
     const { wrap, svg, img } = this.els;
     wrap.style.width = `${this.width}px`;
@@ -59,6 +70,7 @@ export class FieldPicker {
     if (imgUrl) img.src = imgUrl;
     svg.setAttribute('viewBox', `0 0 ${this.width} ${this.height}`);
     this.fit();
+    this.zoomToText();
     this.els.hint.classList.remove('fade');
     clearTimeout(this._hintTimer);
     this._hintTimer = setTimeout(() => this.els.hint.classList.add('fade'), 5000);
@@ -83,6 +95,10 @@ export class FieldPicker {
     this.words = [];
     this.assign.clear();
     this.manual.clear();
+    this.refined.clear();
+    this.pending.clear();
+    this.refineTimers.forEach((t) => clearTimeout(t));
+    this.refineTimers.clear();
     this.els.svg.replaceChildren();
     this.els.img.removeAttribute('src');
   }
@@ -98,11 +114,65 @@ export class FieldPicker {
     return any ? out : null;
   }
 
+  // Índices de las palabras de un campo, en orden de lectura (por líneas, de izquierda a derecha).
+  indicesOf(field) {
+    const idx = [];
+    this.assign.forEach((f, i) => { if (f === field) idx.push(i); });
+    const W = this.words;
+    return idx.sort((a, b) => {
+      const A = W[a], B = W[b];
+      const ca = (A.y0 + A.y1) / 2, cb = (B.y0 + B.y1) / 2;
+      const h = Math.min(A.y1 - A.y0, B.y1 - B.y0);
+      return Math.abs(ca - cb) < h * 0.5 ? A.x0 - B.x0 : ca - cb;
+    });
+  }
+
+  // Prioridad: escrito a mano > relectura de precisión > palabras detectadas.
   valueOf(field) {
     if (this.manual.has(field)) return this.manual.get(field);
-    const parts = [];
-    this.words.forEach((w, i) => { if (this.assign.get(i) === field) parts.push(w.text); });
-    return parts.join(' ');
+    const idx = this.indicesOf(field);
+    if (!idx.length) return '';
+    const r = this.refined.get(field);
+    if (r && r.key === idx.join(',')) return r.text;
+    return cleanValue(this.opts.getType(field), idx.map((i) => this.words[i].text).join(' '));
+  }
+
+  // Confianza (0-100) del valor actual; null si está vacío.
+  confOf(field) {
+    if (this.manual.has(field)) return 100;
+    const idx = this.indicesOf(field);
+    if (!idx.length) return null;
+    const r = this.refined.get(field);
+    if (r && r.key === idx.join(',')) return r.conf;
+    return idx.reduce((a, i) => a + (this.words[i].conf || 0), 0) / idx.length;
+  }
+
+  // Relee el campo con más precisión (con un pequeño retardo mientras el usuario sigue tocando).
+  scheduleRefine(field) {
+    clearTimeout(this.refineTimers.get(field));
+    if (!this.opts.refine || this.manual.has(field)) return;
+    const idx = this.indicesOf(field);
+    if (!idx.length) { this.refined.delete(field); this.pending.delete(field); return; }
+    const key = idx.join(',');
+    const cur = this.refined.get(field);
+    if (cur && cur.key === key) return;
+    this.pending.add(field);
+    this.refineTimers.set(field, setTimeout(async () => {
+      let r = null;
+      try { r = await this.opts.refine(field, idx); } catch (err) { console.warn('refine', err); }
+      if (this.indicesOf(field).join(',') !== key) return; // cambió mientras leía
+      this.pending.delete(field);
+      if (r && r.text) this.refined.set(field, { key, text: r.text, conf: r.conf });
+      this.renderChips(false);
+      this.renderActive();
+    }, 300));
+  }
+
+  refineAll() {
+    this.refined.clear();
+    this.fields.forEach((f) => this.scheduleRefine(f));
+    this.renderChips(false);
+    this.renderActive();
   }
 
   filledCount() { return this.fields.filter((f) => this.valueOf(f).trim()).length; }
@@ -112,6 +182,7 @@ export class FieldPicker {
     const fields = this.fields;
     for (const [i, f] of [...this.assign]) if (!fields.includes(f)) this.assign.delete(i);
     for (const f of [...this.manual.keys()]) if (!fields.includes(f)) this.manual.delete(f);
+    for (const f of [...this.refined.keys()]) if (!fields.includes(f)) this.refined.delete(f);
     if (newActive && fields.includes(newActive)) this.active = newActive;
     if (!fields.includes(this.active)) this.active = fields[0] || null;
     this.renderAll();
@@ -142,6 +213,9 @@ export class FieldPicker {
     if (!f) return;
     for (const [i, ff] of [...this.assign]) if (ff === f) this.assign.delete(i);
     this.manual.delete(f);
+    this.refined.delete(f);
+    this.pending.delete(f);
+    clearTimeout(this.refineTimers.get(f));
     this.renderOverlay();
     this.renderChips(false);
     this.renderActive();
@@ -159,6 +233,7 @@ export class FieldPicker {
     if (!this.fields.length) { this.opts.requestAddField(); return; }
     if (!this.active) this.active = this.fields[0];
     const f = this.active;
+    const affected = new Set([f]);
     const allMine = indices.every((i) => this.assign.get(i) === f);
     for (const i of [...indices].sort((a, b) => a - b)) {
       const word = this.words[i].text;
@@ -167,12 +242,14 @@ export class FieldPicker {
         if (this.manual.has(f)) this.manual.set(f, removeOnce(this.manual.get(f), word));
       } else if (this.assign.get(i) !== f) {
         const prev = this.assign.get(i);
+        if (prev) affected.add(prev);
         if (prev && this.manual.has(prev)) this.manual.set(prev, removeOnce(this.manual.get(prev), word));
         this.assign.set(i, f);
         if (this.manual.has(f)) this.manual.set(f, (this.manual.get(f) + ' ' + word).trim());
       }
     }
     if (typeof navigator.vibrate === 'function') { try { navigator.vibrate(15); } catch { /* ignorar */ } }
+    affected.forEach((x) => this.scheduleRefine(x));
     this.renderOverlay();
     this.renderChips(false);
     this.renderActive();
@@ -186,6 +263,27 @@ export class FieldPicker {
     this.view.zoom = 1;
     this.view.tx = (sw - this.width * this.view.base) / 2;
     this.view.ty = (sh - this.height * this.view.base) / 2;
+    this.applyView();
+  }
+
+  // Amplía para que la zona con texto ocupe la pantalla (las etiquetas suelen ser pequeñas en la foto).
+  zoomToText() {
+    if (!this.words.length) return;
+    const xs0 = this.words.map((w) => w.x0), ys0 = this.words.map((w) => w.y0);
+    const xs1 = this.words.map((w) => w.x1), ys1 = this.words.map((w) => w.y1);
+    const h = Math.max(...this.words.map((w) => w.y1 - w.y0));
+    const x0 = Math.max(0, Math.min(...xs0) - h), y0 = Math.max(0, Math.min(...ys0) - h);
+    const x1 = Math.min(this.width, Math.max(...xs1) + h), y1 = Math.min(this.height, Math.max(...ys1) + h);
+    const r = this.els.stage.getBoundingClientRect();
+    const v = this.view;
+    const want = Math.min(r.width / (x1 - x0), r.height / (y1 - y0));
+    const zoom = Math.min(4, Math.max(1, want / v.base));
+    if (zoom < 1.15) return;
+    v.zoom = zoom;
+    const s = v.base * zoom;
+    v.tx = r.width / 2 - ((x0 + x1) / 2) * s;
+    v.ty = r.height / 2 - ((y0 + y1) / 2) * s;
+    this.clamp();
     this.applyView();
   }
 
@@ -243,8 +341,12 @@ export class FieldPicker {
       const val = document.createElement('span');
       val.className = 'chip-val';
       const v = this.valueOf(f).trim();
-      val.textContent = v || '—';
+      const conf = this.confOf(f);
+      const doubt = v && conf != null && conf < DOUBT_CONF && !this.pending.has(f);
+      val.textContent = (doubt ? '⚠ ' : '') + (v || '—');
       if (v) b.classList.add('filled');
+      if (this.pending.has(f)) b.classList.add('pending');
+      if (doubt) b.classList.add('doubt');
       b.append(name, val);
       frag.appendChild(b);
     });
@@ -265,9 +367,17 @@ export class FieldPicker {
   }
 
   renderActive() {
-    const { activeLabel, activeInput, activeNext } = this.els;
+    const { activeLabel, activeInput, activeNext, activeHint } = this.els;
     const f = this.active;
-    activeLabel.textContent = f || '';
+    const type = f ? this.opts.getType(f) : 'texto';
+    activeLabel.textContent = f ? (type !== 'texto' ? `${f} · ${FIELD_TYPES[type].short}` : f) : '';
+    if (activeHint) {
+      const v = f ? this.valueOf(f).trim() : '';
+      const conf = f ? this.confOf(f) : null;
+      if (f && this.pending.has(f)) { activeHint.textContent = 'Releyendo con más precisión…'; activeHint.className = 'active-hint busy'; }
+      else if (v && conf != null && conf < DOUBT_CONF) { activeHint.textContent = 'Lectura dudosa: compárala con la foto y corrígela si hace falta.'; activeHint.className = 'active-hint warn'; }
+      else { activeHint.textContent = ''; activeHint.className = 'active-hint'; }
+    }
     activeLabel.style.color = f ? colorFor(this.fields, f) : '';
     if (document.activeElement !== activeInput) activeInput.value = f ? this.valueOf(f) : '';
     const last = this.fields.indexOf(f) === this.fields.length - 1;
@@ -293,7 +403,7 @@ export class FieldPicker {
         r.style.fillOpacity = '0.38';
         r.style.stroke = c;
       } else {
-        r.setAttribute('class', 'w');
+        r.setAttribute('class', (w.conf || 0) < LOW_WORD_CONF ? 'w low' : 'w');
       }
       frag.appendChild(r);
     });
@@ -320,7 +430,7 @@ export class FieldPicker {
     });
     zoomIn.addEventListener('click', () => this.zoomBy(1.6));
     zoomOut.addEventListener('click', () => this.zoomBy(1 / 1.6));
-    activeInput.addEventListener('input', () => this.setManual(activeInput.value));
+    activeInput.addEventListener('input', () => { this.setManual(activeInput.value); this.renderActive(); });
     activeInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); if (!this.next()) activeInput.blur(); }
     });

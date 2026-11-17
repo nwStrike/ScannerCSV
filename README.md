@@ -19,6 +19,18 @@ La app tiene tres pestañas abajo: **Escanear**, **Lista** y **Ajustes**.
 
 Toca un escaneo para editarlo, añadirle una nota o borrarlo.
 
+## Precisión del OCR
+
+Pensado sobre todo para **etiquetas de cajas** (letra pequeña, poco contraste, brillos):
+
+- **Captura**: en modo Texto la cámara pide más resolución (4K si el móvil la da) y, al disparar, toma 4 fotogramas y se queda con el más nítido.
+- **Detección**: la imagen se endereza si está torcida, se pasa a grises con contraste estirado, se amplía si es pequeña y se analiza en modo «texto disperso» (Ajustes › Tipo de texto: Etiquetas/Documentos).
+- **Relectura de precisión**: al asignar palabras a un campo, ese trozo se vuelve a leer desde la imagen original con varias ampliaciones y dos preprocesados (contraste y blanco/negro adaptativo), en modo «una línea». Gana la lectura con más confianza (con un extra si varias coinciden).
+- **Tipos de campo** (Texto, Número, Fecha, Código/lote): limitan los caracteres posibles y corrigen confusiones típicas (O→0, l→1, S→5, B→8 en números y fechas). Se proponen solos por el nombre del campo.
+- **Avisos**: las palabras poco fiables se marcan con borde discontinuo naranja y los valores dudosos con ⚠.
+
+Lo que más mejora el resultado: acercarse para que la letra se vea grande, buena luz sin reflejos y la etiqueta lo más plana y recta posible.
+
 ## Publicación
 
 Es un sitio estático, sin compilación. La cámara y el service worker **solo funcionan con HTTPS** (o `localhost`).
@@ -74,6 +86,9 @@ js/camera.js            cámara, linterna, enfoque
 js/barcode-worker.js    lector de códigos (ZXing + BarcodeDetector opcional)
 js/ocr.js               Tesseract.js y reducción de imagen
 js/fields.js            selección de campos sobre la imagen del OCR
+js/refine.js            relectura de precisión de cada campo
+js/preprocess.js        preprocesado de imagen (contraste, umbral adaptativo, nitidez, giro)
+js/fieldtypes.js        tipos de campo y correcciones
 js/csv.js               generación y exportación del CSV
 js/db.js                IndexedDB y almacenamiento persistente
 sw.js                   service worker (sin conexión)

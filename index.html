@@ -161,6 +161,13 @@
           </select>
         </label>
         <label class="row">
+          <span class="row-main">Tipo de texto<small>Etiquetas: texto suelto · Documentos: párrafos</small></span>
+          <select id="setDocType" class="row-select">
+            <option value="etiqueta">Etiquetas</option>
+            <option value="documento">Documentos</option>
+          </select>
+        </label>
+        <label class="row">
           <span class="row-main">Ignorar códigos repetidos<small>No guarda un código que ya está en la lista</small></span>
           <input id="setDedupe" type="checkbox" class="switch">
         </label>
@@ -227,6 +234,7 @@
           <button id="activeClear" class="btn btn-secondary btn-square" type="button" aria-label="Vaciar campo"><svg width="20" height="20"><use href="#i-close"/></svg></button>
           <button id="activeNext" class="btn btn-primary btn-square" type="button" aria-label="Siguiente campo"><svg width="22" height="22"><use href="#i-next"/></svg></button>
         </div>
+        <p id="activeHint" class="active-hint" aria-live="polite"></p>
       </div>
       <div class="ed-links">
         <button id="fullTextBtn" class="link-btn" type="button"><svg width="18" height="18" aria-hidden="true"><use href="#i-text"/></svg>Texto completo</button>
@@ -267,6 +275,16 @@
         <input id="fieldNameInput" type="text" maxlength="40" autocomplete="off" enterkeyhint="done" placeholder="p. ej. Total, Lote, Caducidad">
       </label>
       <div id="fieldSuggest" class="suggest"></div>
+      <label class="field">
+        <span>Tipo de dato</span>
+        <select id="fieldTypeSelect" class="field-select">
+          <option value="texto">Texto</option>
+          <option value="numero">Número / importe (solo cifras)</option>
+          <option value="fecha">Fecha</option>
+          <option value="codigo">Código / lote (mayúsculas y cifras)</option>
+        </select>
+      </label>
+      <p class="muted small">El tipo ayuda al OCR: en números y fechas corrige confusiones como O→0, l→1 o S→5.</p>
       <div class="sheet-actions">
         <button class="btn btn-primary" value="ok" type="submit">Guardar</button>
         <button class="btn btn-secondary" value="cancel" type="submit" formnovalidate>Cancelar</button>

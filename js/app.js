@@ -4,8 +4,13 @@ import { buildCsv, csvFileName, exportCsv, formatLabel, formatDate } from './csv
 import { Camera } from './camera.js';
 import * as ocr from './ocr.js';
 import { FieldPicker, colorFor, validateFieldName } from './fields.js';
+import { FIELD_TYPES, guessType } from './fieldtypes.js';
+import { refineWords } from './refine.js';
+import { grayStretch, sharpness, rotateCanvas } from './preprocess.js';
 
-const APP_VERSION = '2.0.0-dev';
+const APP_VERSION = '2.1.0-dev';
+const SOURCE_SIDE = 3000; // lado largo máximo de la imagen original guardada para releer campos
+const PSM_BY_DOC = { etiqueta: '11', documento: '3' }; // texto disperso / página normal
 const MAX_RENDERED = 400;
 const SCAN_SIDE = 800; // lado largo de la región enviada al lector de códigos
 const COOLDOWN_MS = 2500;
@@ -36,12 +41,13 @@ const els = {
   // editor
   editor: $('editor'), edCancel: $('edCancel'), edSave: $('edSave'), edTitle: $('edTitle'),
   ocrProgress: $('ocrProgress'), ocrStatus: $('ocrStatus'), ocrPct: $('ocrPct'), ocrBar: $('ocrBar'), ocrFill: $('ocrFill'), ocrCancel: $('ocrCancel'),
-  edPanel: $('edPanel'), fullTextBtn: $('fullTextBtn'),
+  edPanel: $('edPanel'), fullTextBtn: $('fullTextBtn'), ocrPreviewImg: $('ocrPreview'),
   textDialog: $('textDialog'), ocrText: $('ocrText'),
   // diálogos
   editDialog: $('editDialog'), editTitle: $('editTitle'), editValue: $('editValue'), editValueField: $('editValueField'),
   editFields: $('editFields'), editNote: $('editNote'), editMeta: $('editMeta'), editDelete: $('editDelete'),
   fieldDialog: $('fieldDialog'), fieldForm: $('fieldForm'), fieldNameInput: $('fieldNameInput'), fieldSuggest: $('fieldSuggest'),
+  fieldTypeSelect: $('fieldTypeSelect'), setDocType: $('setDocType'),
   confirmDialog: $('confirmDialog'), confirmText: $('confirmText'), confirmOk: $('confirmOk'),
   toast: $('toast'), toastText: $('toastText'), toastAction: $('toastAction'),
 };
@@ -65,7 +71,7 @@ const state = {
   paused: false,
   records: [],
   query: '',
-  settings: { sep: ';', protect: true, lang: 'spa', dedupe: false, beep: true, fields: [] },
+  settings: { sep: ';', protect: true, lang: 'spa', dedupe: false, beep: true, fields: [], fieldTypes: {}, docType: 'etiqueta' },
   lastHit: { text: '', at: 0 },
   lastSaved: null,
   newIds: new Set(),
@@ -84,10 +90,14 @@ const stillRequests = new Map();
 const picker = new FieldPicker({
   chips: $('fieldChips'), noFieldsHint: $('noFieldsHint'), activeRow: $('activeRow'), activeLabel: $('activeLabel'),
   activeInput: $('activeInput'), activeClear: $('activeClear'), activeNext: $('activeNext'), progress: $('fieldsProgress'),
+  activeHint: $('activeHint'),
   stage: $('ocrStage'), wrap: $('ocrCanvasWrap'), img: $('ocrPreview'), svg: $('ocrOverlay'),
   zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), hint: $('stageHint'),
 }, {
   getFields: () => state.settings.fields,
+  getType: (f) => fieldType(f),
+  refine: (field, indices) => refineWords(els.ocrPreviewImg, els.ocrPreviewImg.naturalWidth, picker.width, picker.words, indices,
+    { type: fieldType(field), lang: state.settings.lang }),
   toast: (m) => toast(m, { ms: 3500 }),
   requestAddField: () => addFieldFlow(),
   onDone: () => els.edSave.focus(),
@@ -353,6 +363,16 @@ function openEdit(rec) {
 }
 
 // --- Campos (definición) -----------------------------------------------------------------------
+function fieldType(f) {
+  const t = state.settings.fieldTypes && state.settings.fieldTypes[f];
+  return FIELD_TYPES[t] ? t : 'texto';
+}
+
+function setFieldType(f, type) {
+  state.settings.fieldTypes = { ...(state.settings.fieldTypes || {}), [f]: type };
+  saveSettings();
+}
+
 function setFields(fields) {
   state.settings.fields = fields;
   saveSettings();
@@ -370,13 +390,24 @@ function renderFieldList() {
     const name = document.createElement('span');
     name.className = 'name';
     name.textContent = f;
+    const sel = document.createElement('select');
+    sel.className = 'row-select type-select';
+    sel.dataset.typeFor = f;
+    sel.setAttribute('aria-label', `Tipo del campo ${f}`);
+    Object.entries(FIELD_TYPES).forEach(([k, v]) => {
+      const o = document.createElement('option');
+      o.value = k;
+      o.textContent = v.short;
+      sel.appendChild(o);
+    });
+    sel.value = fieldType(f);
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'icon-btn';
     del.dataset.remove = f;
     del.setAttribute('aria-label', `Quitar campo ${f}`);
     del.innerHTML = '<svg width="20" height="20" aria-hidden="true"><use href="#i-trash"/></svg>';
-    li.append(dot, name, del);
+    li.append(dot, name, sel, del);
     frag.appendChild(li);
   });
   els.fieldList.replaceChildren(frag);
@@ -387,6 +418,8 @@ function askFieldName() {
   const input = els.fieldNameInput;
   input.value = '';
   input.setCustomValidity('');
+  els.fieldTypeSelect.value = 'texto';
+  els.fieldTypeSelect.dataset.touched = '';
   const existing = state.settings.fields.map((f) => f.toLowerCase());
   els.fieldSuggest.replaceChildren(...FIELD_SUGGESTIONS
     .filter((s) => !existing.includes(s.toLowerCase()))
@@ -395,26 +428,35 @@ function askFieldName() {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = s;
-      b.addEventListener('click', () => { input.value = s; input.setCustomValidity(''); input.focus(); });
+      b.addEventListener('click', () => { input.value = s; input.setCustomValidity(''); syncTypeGuess(); input.focus(); });
       return b;
     }));
   if (!hasDialog(els.fieldDialog)) {
     const v = window.prompt('Nombre del campo');
     const r = validateFieldName(v, state.settings.fields);
     if (r.error) { if (v) toast(r.error); return Promise.resolve(null); }
-    return Promise.resolve(r.name);
+    return Promise.resolve({ name: r.name, type: guessType(r.name) });
   }
   setTimeout(() => input.focus(), 60);
   return openSheet(els.fieldDialog).then((v) => {
     if (v !== 'ok') return null;
     const r = validateFieldName(input.value, state.settings.fields);
-    return r.error ? null : r.name;
+    if (r.error) return null;
+    return { name: r.name, type: els.fieldTypeSelect.value };
   });
 }
 
+// Propone el tipo según el nombre, salvo que el usuario ya lo haya elegido.
+function syncTypeGuess() {
+  if (els.fieldTypeSelect.dataset.touched) return;
+  els.fieldTypeSelect.value = guessType(els.fieldNameInput.value);
+}
+
 async function addFieldFlow() {
-  const name = await askFieldName();
-  if (!name) return null;
+  const res = await askFieldName();
+  if (!res) return null;
+  const { name, type } = res;
+  setFieldType(name, type);
   setFields([...state.settings.fields, name]);
   picker.fieldsChanged(name);
   return name;
@@ -466,7 +508,7 @@ async function startCamera(deviceId) {
   els.cameraBtn.disabled = true;
   els.placeholderText.textContent = 'Iniciando cámara…';
   try {
-    await camera.start(deviceId);
+    await camera.start(deviceId, { highRes: state.mode === 'ocr' });
     // Si mientras arrancaba el usuario cambió de pestaña o abrió el editor, la paramos.
     if (state.tab !== 'scan' || els.body.classList.contains('editing') || document.visibilityState === 'hidden') {
       camera.stop();
@@ -649,32 +691,48 @@ function setOcrProgress(p) {
 
 function canvasToBlob(c) {
   return new Promise((resolve) => {
-    if (c.toBlob) c.toBlob((b) => resolve(b), 'image/jpeg', 0.88);
+    if (c.toBlob) c.toBlob((b) => resolve(b), 'image/jpeg', 0.93);
     else resolve(null);
   });
 }
 
-async function runOcr(canvas) {
+// sourceCanvas: imagen original (≤ SOURCE_SIDE px). Se detecta el texto en una copia de ≤1600 px
+// (preprocesada) y cada campo se relee después desde la original, con más resolución.
+async function runOcr(sourceCanvas) {
   const token = ++ocrToken;
   openEditor();
   els.ocrProgress.hidden = false;
   els.edSave.disabled = true;
   els.edPanel.hidden = true;
   setOcrProgress({ status: 'Preparando', progress: 0 });
-  const width = canvas.width, height = canvas.height;
+  let source = sourceCanvas;
+  let det = null;
   try {
-    const blob = await canvasToBlob(canvas);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    previewUrl = blob ? URL.createObjectURL(blob) : null;
+    // Detección: ≤1600 px (también amplía fotos pequeñas) en grises con contraste estirado.
+    det = ocr.scaleToSide(source, source.width, source.height, ocr.MAX_OCR_SIDE);
+    grayStretch(det);
+    const width = det.width, height = det.height;
+    await setPreview(source);
     picker.preview({ imgUrl: previewUrl, width, height });
-    const { text, words } = await ocr.recognize(canvas, state.settings.lang, (p) => { if (token === ocrToken) setOcrProgress(p); });
+    const res = await ocr.recognize(det, state.settings.lang, (p) => { if (token === ocrToken) setOcrProgress(p); }, {
+      params: { tessedit_pageseg_mode: PSM_BY_DOC[state.settings.docType] || '11', preserve_interword_spaces: '1', user_defined_dpi: '300' },
+      rotateAuto: true,
+    });
     if (token !== ocrToken) return;
-    els.ocrText.value = cleanOcrText(text);
+    // Si Tesseract enderezó la imagen, giramos igual la original para que coincidan los recuadros.
+    if (res.rotateRadians) {
+      const rotated = rotateCanvas(source, res.rotateRadians);
+      ocr.releaseCanvas(source);
+      source = rotated;
+      await setPreview(source);
+    }
+    els.ocrText.value = cleanOcrText(res.text);
     els.ocrProgress.hidden = true;
     els.edPanel.hidden = false;
     els.edSave.disabled = false;
-    picker.load({ imgUrl: previewUrl, width, height, words });
-    if (!words.length) toast('No se reconoció texto. Prueba con más luz o más cerca.', { ms: 4000 });
+    try { await els.ocrPreviewImg.decode(); } catch { /* se usará cuando cargue */ }
+    picker.load({ imgUrl: previewUrl, width, height, words: res.words });
+    if (!res.words.length) toast('No se reconoció texto. Acércate más, con buena luz y sin reflejos.', { ms: 4500 });
   } catch (err) {
     if (token !== ocrToken) return;
     console.error(err);
@@ -684,8 +742,16 @@ async function runOcr(canvas) {
       ? 'El OCR necesita descargarse una vez con conexión (Ajustes › Preparar OCR sin conexión).'
       : 'Error en el OCR: ' + (err && err.message || err), { ms: 6000 });
   } finally {
-    ocr.releaseCanvas(canvas);
+    ocr.releaseCanvas(det);
+    ocr.releaseCanvas(source);
   }
+}
+
+async function setPreview(canvas) {
+  const blob = await canvasToBlob(canvas);
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = blob ? URL.createObjectURL(blob) : null;
+  if (previewUrl) els.ocrPreviewImg.src = previewUrl;
 }
 
 function cleanOcrText(t) {
@@ -696,14 +762,28 @@ function cleanOcrText(t) {
     .trim();
 }
 
-function captureForOcr() {
-  if (!camera.active || !els.video.videoWidth) return;
-  const roi = camera.screenRectToVideo(els.frame.getBoundingClientRect());
-  // ≤1600 px de lado largo antes del OCR (memoria en iPhones antiguos).
-  const c = camera.grab(roi, ocr.MAX_OCR_SIDE, document.createElement('canvas'));
+// Toma varios fotogramas seguidos y se queda con el más nítido (evita el movimiento al pulsar).
+let capturing = false;
+async function captureForOcr() {
+  if (!camera.active || !els.video.videoWidth || capturing) return;
+  capturing = true;
   flash();
   vibrate(30);
-  runOcr(c);
+  try {
+    const roi = camera.screenRectToVideo(els.frame.getBoundingClientRect());
+    let best = null, bestScore = -1;
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, i === 0 ? 180 : 110));
+      if (!camera.active) break;
+      const c = camera.grab(roi, SOURCE_SIDE, document.createElement('canvas'));
+      const score = sharpness(c, c.width, c.height);
+      if (score > bestScore) { ocr.releaseCanvas(best); best = c; bestScore = score; }
+      else ocr.releaseCanvas(c);
+    }
+    if (best) runOcr(best);
+  } finally {
+    capturing = false;
+  }
 }
 
 async function saveEditorFields() {
@@ -733,7 +813,7 @@ async function handleFile(file) {
   const w = img.naturalWidth, h = img.naturalHeight;
   try {
     if (state.mode === 'ocr') {
-      const c = ocr.downscale(img, w, h, ocr.MAX_OCR_SIDE);
+      const c = ocr.downscale(img, w, h, SOURCE_SIDE);
       release();
       runOcr(c);
       return;
@@ -767,6 +847,7 @@ function setMode(mode) {
   if (mode === 'ocr') els.lastScan.hidden = true;
   if (camera.active && mode === 'barcode') startScanLoop();
   else stopScanLoop();
+  if (camera.active) camera.setHighRes(mode === 'ocr');
   setCameraUi(camera.active);
 }
 
@@ -860,6 +941,7 @@ function applySettingsToUi() {
   els.setLang.value = s.lang;
   els.setDedupe.checked = !!s.dedupe;
   els.setBeep.checked = !!s.beep;
+  els.setDocType.value = s.docType || 'etiqueta';
   renderFieldList();
 }
 function saveSettings() {
@@ -1004,6 +1086,15 @@ function bindEvents() {
   els.setProtect.addEventListener('change', onSetting('protect', (t) => t.checked));
   els.setLang.addEventListener('change', onSetting('lang', (t) => t.value));
   els.setDedupe.addEventListener('change', onSetting('dedupe', (t) => t.checked));
+  els.setDocType.addEventListener('change', onSetting('docType', (t) => t.value));
+  els.fieldList.addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-type-for]');
+    if (!sel) return;
+    setFieldType(sel.dataset.typeFor, sel.value);
+    picker.refineAll();
+  });
+  els.fieldNameInput.addEventListener('input', syncTypeGuess);
+  els.fieldTypeSelect.addEventListener('change', () => { els.fieldTypeSelect.dataset.touched = '1'; });
   els.setBeep.addEventListener('change', (e) => { state.settings.beep = e.target.checked; if (e.target.checked) { unlockAudio(); beep(); } saveSettings(); });
   els.settingsAddField.addEventListener('click', () => addFieldFlow());
   els.fieldList.addEventListener('click', async (e) => {
@@ -1083,6 +1174,7 @@ async function init() {
     const saved = await db.getSetting('prefs');
     if (saved && typeof saved === 'object') Object.assign(state.settings, saved);
     if (!Array.isArray(state.settings.fields)) state.settings.fields = [];
+    if (!state.settings.fieldTypes || typeof state.settings.fieldTypes !== 'object') state.settings.fieldTypes = {};
   } catch (err) { console.warn(err); }
   applySettingsToUi();
   if (safeLocal.get('mode') === 'ocr') setMode('ocr');

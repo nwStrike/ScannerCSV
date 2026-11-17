@@ -93,17 +93,39 @@ export async function terminate() {
   if (w) { try { await w.terminate(); } catch { /* ignorar */ } }
 }
 
-// Reconoce el texto de un canvas ya reducido. onProgress({status, progress}).
-// Devuelve { text, words: [{ text, x0, y0, x1, y1, line }] } en coordenadas del canvas.
-export async function recognize(canvas, lang, onProgress) {
+// Reconoce el texto de un canvas ya reducido (≤1600 px). onProgress({status, progress}).
+// opts.params: parámetros de Tesseract solo para esta llamada (p. ej. tessedit_pageseg_mode).
+// opts.rotateAuto: endereza la imagen si está algo torcida (las cajas vienen en el sistema enderezado).
+// Devuelve { text, words: [{ text, x0, y0, x1, y1, line, conf }], confidence, rotateRadians }.
+export async function recognize(canvas, lang, onProgress, opts = {}) {
   clearTimeout(idleTimer);
   progressCb = onProgress;
   try {
     const w = await getWorker(lang);
-    const { data } = await w.recognize(canvas, {}, { text: true, blocks: true });
-    return { text: (data && data.text) || '', words: extractWords(data) };
+    const options = { ...(opts.params || {}) };
+    if (opts.rotateAuto) options.rotateAuto = true;
+    const { data } = await w.recognize(canvas, options, { text: true, blocks: true });
+    return {
+      text: (data && data.text) || '',
+      words: extractWords(data),
+      confidence: (data && data.confidence) || 0,
+      rotateRadians: (data && data.rotateRadians) || 0,
+    };
   } finally {
     progressCb = null;
+    scheduleIdle();
+  }
+}
+
+// Relee un recorte pequeño (un campo). Devuelve { text, conf }.
+export async function recognizeRegion(canvas, lang, params) {
+  clearTimeout(idleTimer);
+  try {
+    const w = await getWorker(lang);
+    const { data } = await w.recognize(canvas, { ...params }, { text: true, blocks: true });
+    const conf = (data && data.confidence) || 0;
+    return { text: ((data && data.text) || '').replace(/\s+/g, ' ').trim(), conf };
+  } finally {
     scheduleIdle();
   }
 }
@@ -179,6 +201,22 @@ export function downscale(source, srcW, srcH, maxSide = MAX_OCR_SIDE, { grayscal
     }
     ctx.putImageData(id, 0, 0);
   }
+  return c;
+}
+
+// Como downscale, pero también amplía (hasta maxUp) si la imagen es pequeña:
+// Tesseract detecta mal letras de menos de ~20 px de alto.
+export function scaleToSide(source, srcW, srcH, side = MAX_OCR_SIDE, maxUp = 2.5) {
+  const scale = Math.min(maxUp, side / Math.max(srcW, srcH));
+  const w = Math.max(1, Math.round(srcW * scale));
+  const h = Math.max(1, Math.round(srcH * scale));
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, 0, 0, srcW, srcH, 0, 0, w, h);
   return c;
 }
 

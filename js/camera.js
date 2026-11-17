@@ -23,11 +23,11 @@ export class Camera {
 
   get active() { return !!(this.track && this.track.readyState === 'live'); }
 
-  async start(deviceId) {
+  async start(deviceId, { highRes = false } = {}) {
     this.stop();
     const video = {
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
+      width: { ideal: highRes ? 3840 : 1920 },
+      height: { ideal: highRes ? 2160 : 1080 },
     };
     if (deviceId) video.deviceId = { exact: deviceId };
     else video.facingMode = { ideal: 'environment' };
@@ -58,6 +58,18 @@ export class Camera {
     await this._readCapabilities();
     await this._listDevices();
     return this.track;
+  }
+
+  // Más resolución para leer texto (4K si la cámara la da); 1080p para códigos (más fluido).
+  async setHighRes(on) {
+    if (!this.track || typeof this.track.applyConstraints !== 'function') return false;
+    try {
+      await this.track.applyConstraints({ width: { ideal: on ? 3840 : 1920 }, height: { ideal: on ? 2160 : 1080 } });
+      return true;
+    } catch (err) {
+      console.warn('resolución', err);
+      return false;
+    }
   }
 
   stop() {
