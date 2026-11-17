@@ -6,7 +6,11 @@ Funciona en Safari iOS 16+ y Chrome Android, en el navegador o instalada en la p
 ## Uso
 
 1. **Código de barras**: «Iniciar cámara» y centra el código en el marco. Se guarda solo (con sonido y «Deshacer»).
-2. **Texto (OCR)**: cambia a «Texto (OCR)», encuadra y pulsa «Capturar texto». Revisa el texto y guárdalo como una fila o como una fila por línea.
+2. **Texto (OCR)**: cambia a «Texto (OCR)», encuadra y pulsa «Capturar texto». Después eliges qué datos te interesan:
+   - Crea tus **campos** con «+ Campo» (p. ej. «Nº factura», «Cliente», «Total», «Lote», «Caducidad»). Se recuerdan para la próxima vez; «Editar campos» permite quitarlos.
+   - Elige un campo y **toca las palabras** en la foto (o arrastra un recuadro para coger varias). Tocar otra vez una palabra la quita. «Ampliar» agranda la imagen para textos pequeños.
+   - Corrige el valor a mano si hace falta y pulsa **«Guardar fila»**: cada documento es una fila y cada campo, una columna del CSV.
+   - En «Texto completo» sigue disponible guardar todo el texto (una fila o una fila por línea).
 3. **Desde foto**: analiza una imagen de la galería (código u OCR, según el modo).
 4. **Exportar CSV**: abre el menú Compartir del sistema (guardar en Archivos, enviar por correo, WhatsApp, Drive…). «Descargar» guarda el archivo directamente.
 
@@ -42,6 +46,8 @@ Al publicar cambios, sube la constante `VERSION` de `sw.js` para que los cliente
 
 ### CSV y Excel
 
+- Columnas fijas: `Fecha;Tipo;Formato;Valor;Nota`, y después **una columna por cada campo** usado (en el orden de tu lista de campos). Los documentos con campos tienen `Tipo = Documento` y `Valor` vacío.
+
 - Separador por defecto `;` (Excel con configuración regional española). En Ajustes se puede cambiar a `,`.
 - Opción «Conservar ceros iniciales y códigos largos»: los códigos numéricos de ≥12 dígitos o con cero inicial se escriben como `="0123…"` para que Excel no los convierta a `1,23E+12` ni quite los ceros.
 - Los textos que empiezan por `=`, `+`, `-` o `@` se prefijan con `'` para evitar la inyección de fórmulas.
@@ -64,6 +70,7 @@ js/app.js               lógica principal
 js/camera.js            cámara, linterna, enfoque
 js/barcode-worker.js    lector de códigos (ZXing + BarcodeDetector opcional)
 js/ocr.js               Tesseract.js y reducción de imagen
+js/fields.js            selección de campos sobre la imagen del OCR
 js/csv.js               generación y exportación del CSV
 js/db.js                IndexedDB y almacenamiento persistente
 sw.js                   service worker (sin conexión)

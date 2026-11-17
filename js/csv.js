@@ -33,21 +33,29 @@ function cell(value, { protectNumbers = false } = {}) {
   return `"${v.replace(/"/g, '""')}"`;
 }
 
-export function buildCsv(records, { sep = ';', protectNumbers = true } = {}) {
-  const header = ['Fecha', 'Tipo', 'Formato', 'Valor', 'Nota'];
+// fieldOrder: campos definidos por el usuario; cada campo usado es una columna más.
+export function buildCsv(records, { sep = ';', protectNumbers = true, fieldOrder = [] } = {}) {
+  const used = new Set();
+  records.forEach((r) => { if (r.fields) Object.keys(r.fields).forEach((k) => used.add(k)); });
+  const extra = fieldOrder.filter((f) => used.has(f));
+  used.forEach((f) => { if (!extra.includes(f)) extra.push(f); });
+
+  const header = ['Fecha', 'Tipo', 'Formato', 'Valor', 'Nota', ...extra];
   const lines = [header.map((h) => cell(h)).join(sep)];
   // Orden cronológico (el más antiguo primero) en el archivo.
   const rows = [...records].sort((a, b) => a.createdAt - b.createdAt);
   for (const r of rows) {
+    const f = r.fields || {};
     lines.push([
       cell(formatDate(r.createdAt)),
-      cell(TYPE_LABELS[r.type] || r.type),
+      cell(r.fields ? 'Documento' : (TYPE_LABELS[r.type] || r.type)),
       cell(formatLabel(r.format)),
       cell(r.value, { protectNumbers }),
       cell(r.note || ''),
+      ...extra.map((k) => cell(f[k] || '', { protectNumbers })),
     ].join(sep));
   }
-  return '﻿' + lines.join('\r\n') + '\r\n';
+  return '\uFEFF' + lines.join('\r\n') + '\r\n';
 }
 
 export function csvFileName(date = new Date()) {

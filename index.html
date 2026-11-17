@@ -99,16 +99,53 @@
         <button id="ocrCancel" class="btn btn-secondary btn-small" type="button">Cancelar</button>
       </div>
       <div id="ocrResult" hidden>
-        <img id="ocrPreview" class="ocr-preview" alt="Imagen analizada">
-        <label class="field">
-          <span>Revisa y corrige el texto antes de guardarlo</span>
-          <textarea id="ocrText" rows="6" spellcheck="false"></textarea>
-        </label>
+        <!-- Campos que el usuario quiere extraer -->
+        <div class="fields-head">
+          <span class="muted small" id="fieldsHelp">1. Elige un campo · 2. Toca las palabras en la foto</span>
+          <button id="fieldsEditBtn" class="btn btn-ghost btn-small" type="button" aria-pressed="false">Editar campos</button>
+        </div>
+        <div id="fieldChips" class="chips" role="radiogroup" aria-label="Campo activo"></div>
+        <form id="addFieldForm" class="add-field" hidden>
+          <input id="addFieldInput" type="text" placeholder="Nombre del campo (p. ej. Total)" autocomplete="off" enterkeyhint="done" maxlength="40">
+          <button class="btn btn-primary btn-small" type="submit">Añadir</button>
+          <button id="addFieldCancel" class="btn btn-secondary btn-small" type="button">Cancelar</button>
+        </form>
+        <p id="noFieldsHint" class="notice notice-info" hidden>
+          Crea los campos que quieras extraer (p. ej. «Nº factura», «Cliente», «Total», «Lote»).
+          Cada campo será una columna del CSV y cada documento, una fila.
+        </p>
+
+        <!-- Imagen con las palabras detectadas -->
+        <div id="ocrStage" class="ocr-stage">
+          <div id="ocrCanvasWrap" class="ocr-wrap">
+            <img id="ocrPreview" class="ocr-img" alt="Imagen analizada">
+            <svg id="ocrOverlay" class="ocr-overlay" aria-hidden="true"></svg>
+          </div>
+        </div>
+        <div class="stage-tools">
+          <button id="ocrZoomBtn" class="btn btn-secondary btn-small" type="button" aria-pressed="false">Ampliar</button>
+          <span id="stageHint" class="muted small">Toca una palabra o arrastra un recuadro para seleccionar varias.</span>
+        </div>
+
+        <!-- Valores de los campos -->
+        <div id="fieldValues" class="field-values"></div>
+
         <div class="actions">
-          <button id="ocrSave" class="btn btn-primary" type="button">Guardar (1 fila)</button>
-          <button id="ocrSaveLines" class="btn btn-secondary" type="button">Una fila por línea</button>
+          <button id="ocrSaveFields" class="btn btn-primary" type="button">Guardar fila</button>
           <button id="ocrDiscard" class="btn btn-ghost" type="button">Descartar</button>
         </div>
+
+        <details class="fulltext">
+          <summary>Texto completo</summary>
+          <label class="field">
+            <span>Todo el texto reconocido (puedes corregirlo)</span>
+            <textarea id="ocrText" rows="6" spellcheck="false"></textarea>
+          </label>
+          <div class="actions">
+            <button id="ocrSave" class="btn btn-secondary" type="button">Guardar texto (1 fila)</button>
+            <button id="ocrSaveLines" class="btn btn-secondary" type="button">Una fila por línea</button>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -172,10 +209,11 @@
   <dialog id="editDialog" class="dialog">
     <form id="editForm" method="dialog">
       <h2 id="editTitle" class="card-title">Editar escaneo</h2>
-      <label class="field">
+      <label id="editValueField" class="field">
         <span>Valor</span>
-        <textarea id="editValue" rows="3" required spellcheck="false"></textarea>
+        <textarea id="editValue" rows="3" spellcheck="false"></textarea>
       </label>
+      <div id="editFields" class="field-values"></div>
       <label class="field">
         <span>Nota (opcional)</span>
         <input id="editNote" type="text" autocomplete="off">

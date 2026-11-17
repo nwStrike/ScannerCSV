@@ -94,13 +94,14 @@ export async function terminate() {
 }
 
 // Reconoce el texto de un canvas ya reducido. onProgress({status, progress}).
+// Devuelve { text, words: [{ text, x0, y0, x1, y1, line }] } en coordenadas del canvas.
 export async function recognize(canvas, lang, onProgress) {
   clearTimeout(idleTimer);
   progressCb = onProgress;
   try {
     const w = await getWorker(lang);
-    const { data } = await w.recognize(canvas);
-    return (data && data.text) || '';
+    const { data } = await w.recognize(canvas, {}, { text: true, blocks: true });
+    return { text: (data && data.text) || '', words: extractWords(data) };
   } finally {
     progressCb = null;
     scheduleIdle();
@@ -119,6 +120,28 @@ export async function prefetch(lang, onProgress) {
 }
 
 export const OCR_URLS = { CORE_PATH, LANG_PATH_BASE };
+
+// Aplana bloques → párrafos → líneas → palabras, en orden de lectura.
+function extractWords(data) {
+  const out = [];
+  let line = 0;
+  for (const block of (data && data.blocks) || []) {
+    for (const para of block.paragraphs || []) {
+      for (const ln of para.lines || []) {
+        for (const w of ln.words || []) {
+          const text = String(w.text || '').trim();
+          const b = w.bbox;
+          if (!text || !b) continue;
+          // Descarta "palabras" de ruido: muy baja confianza y sin letras ni números.
+          if (w.confidence < 20 && !/[\p{L}\p{N}]/u.test(text)) continue;
+          out.push({ text, x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, line, conf: w.confidence });
+        }
+        line++;
+      }
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Utilidades de imagen

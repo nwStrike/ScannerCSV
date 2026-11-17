@@ -3,8 +3,9 @@ import { db, newId, requestPersistence, storageEstimate } from './db.js';
 import { buildCsv, csvFileName, exportCsv, formatLabel, formatDate } from './csv.js';
 import { Camera } from './camera.js';
 import * as ocr from './ocr.js';
+import { FieldPicker } from './fields.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const MAX_RENDERED = 500;
 const SCAN_SIDE = 800; // lado largo de la región que se envía al lector de códigos
 const COOLDOWN_MS = 2500;
@@ -18,7 +19,7 @@ const els = {
   ocrPanel: $('ocrPanel'), ocrProgress: $('ocrProgress'), ocrStatus: $('ocrStatus'), ocrPct: $('ocrPct'),
   ocrBar: $('ocrBar'), ocrFill: $('ocrFill'), ocrCancel: $('ocrCancel'), ocrResult: $('ocrResult'),
   ocrPreview: $('ocrPreview'), ocrText: $('ocrText'), ocrSave: $('ocrSave'), ocrSaveLines: $('ocrSaveLines'),
-  ocrDiscard: $('ocrDiscard'),
+  ocrDiscard: $('ocrDiscard'), ocrSaveFields: $('ocrSaveFields'), editValueField: $('editValueField'), editFields: $('editFields'),
   list: $('list'), count: $('count'), emptyList: $('emptyList'), addManualBtn: $('addManualBtn'),
   exportBtn: $('exportBtn'), downloadBtn: $('downloadBtn'), clearBtn: $('clearBtn'),
   editDialog: $('editDialog'), editForm: $('editForm'), editTitle: $('editTitle'), editValue: $('editValue'),
@@ -47,13 +48,23 @@ const safeLocal = {
 const state = {
   mode: 'barcode',
   records: [],
-  settings: { sep: ';', protect: true, lang: 'spa', dedupe: false, beep: true },
+  settings: { sep: ';', protect: true, lang: 'spa', dedupe: false, beep: true, fields: [] },
   wasRunningBeforeHide: false,
   lastHit: { text: '', at: 0 },
   newIds: new Set(),
 };
 
 const camera = new Camera(els.video);
+const picker = new FieldPicker({
+  chips: $('fieldChips'), editBtn: $('fieldsEditBtn'), help: $('fieldsHelp'), noFieldsHint: $('noFieldsHint'),
+  addForm: $('addFieldForm'), addInput: $('addFieldInput'), addCancel: $('addFieldCancel'),
+  stage: $('ocrStage'), wrap: $('ocrCanvasWrap'), img: $('ocrPreview'), svg: $('ocrOverlay'),
+  zoomBtn: $('ocrZoomBtn'), stageHint: $('stageHint'), values: $('fieldValues'),
+}, {
+  getFields: () => state.settings.fields,
+  setFields: (f) => { state.settings.fields = f; saveSettings(); },
+  toast: (m) => toast(m, { ms: 3500 }),
+});
 let scanTimer = null;
 let scanPending = false;
 let scanPendingSince = 0;
@@ -179,7 +190,18 @@ function renderList() {
     main.className = 'item-main';
     const val = document.createElement('span');
     val.className = 'item-value';
-    val.textContent = r.value;
+    if (r.fields && Object.keys(r.fields).length) {
+      tag.textContent = 'DOC';
+      Object.entries(r.fields).forEach(([k, v], i) => {
+        if (i) val.append(' · ');
+        const b = document.createElement('b');
+        b.textContent = k + ': ';
+        val.append(b, v);
+      });
+      val.classList.add('item-fields');
+    } else {
+      val.textContent = r.value;
+    }
     const meta = document.createElement('span');
     meta.className = 'item-meta';
     meta.textContent = formatDate(r.createdAt) + (r.note ? ' · ' + r.note : '');
@@ -209,8 +231,27 @@ function openEdit(rec) {
     else { rec.value = v.trim(); db.putRecord(rec).then(renderList); }
     return;
   }
-  els.editTitle.textContent = isNew ? 'Añadir a mano' : 'Editar escaneo';
+  const hasFields = !!(rec && rec.fields && Object.keys(rec.fields).length);
+  els.editTitle.textContent = isNew ? 'Añadir a mano' : hasFields ? 'Editar documento' : 'Editar escaneo';
   els.editValue.value = rec ? rec.value : '';
+  els.editValueField.hidden = hasFields;
+  els.editFields.replaceChildren();
+  const fieldInputs = {};
+  if (hasFields) {
+    Object.entries(rec.fields).forEach(([k, v]) => {
+      const label = document.createElement('label');
+      label.className = 'field';
+      const span = document.createElement('span');
+      span.textContent = k;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.autocomplete = 'off';
+      input.value = v;
+      label.append(span, input);
+      els.editFields.appendChild(label);
+      fieldInputs[k] = input;
+    });
+  }
   els.editNote.value = rec ? (rec.note || '') : '';
   els.editMeta.textContent = rec ? `${formatLabel(rec.format)} · ${formatDate(rec.createdAt)}` : '';
   els.editDelete.hidden = isNew;
@@ -218,19 +259,28 @@ function openEdit(rec) {
   els.editDialog.addEventListener('close', async () => {
     const action = els.editDialog.returnValue;
     if (action === 'save') {
-      const value = els.editValue.value.trim();
-      if (!value) return;
-      if (isNew) {
-        await addRecords([{ id: newId(), type: 'manual', format: 'MANUAL', value, note: els.editNote.value.trim(), createdAt: Date.now() }], { announce: false });
-        toast('Añadido');
+      const note = els.editNote.value.trim();
+      let updated;
+      if (hasFields) {
+        const fields = {};
+        Object.entries(fieldInputs).forEach(([k, input]) => { const v = input.value.trim(); if (v) fields[k] = v; });
+        if (!Object.keys(fields).length) { toast('Todos los campos están vacíos: no se ha guardado. Usa «Eliminar» para borrarlo.', { ms: 4500 }); return; }
+        updated = { ...rec, fields, note };
       } else {
-        const updated = { ...rec, value, note: els.editNote.value.trim() };
-        try {
-          await db.putRecord(updated);
-          state.records = state.records.map((r) => (r.id === rec.id ? updated : r));
-          renderList();
-        } catch (err) { toast('No se pudo guardar'); }
+        const value = els.editValue.value.trim();
+        if (!value) { toast('El valor está vacío: no se ha guardado.'); return; }
+        if (isNew) {
+          await addRecords([{ id: newId(), type: 'manual', format: 'MANUAL', value, note, createdAt: Date.now() }], { announce: false });
+          toast('Añadido');
+          return;
+        }
+        updated = { ...rec, value, note };
       }
+      try {
+        await db.putRecord(updated);
+        state.records = state.records.map((r) => (r.id === rec.id ? updated : r));
+        renderList();
+      } catch (err) { toast('No se pudo guardar'); }
     } else if (action === 'delete' && rec) {
       await removeRecords([rec.id]);
       toast('Eliminado', { action: 'Deshacer', onAction: () => addRecords([rec], { announce: false }) });
@@ -414,14 +464,15 @@ async function runOcr(canvas) {
     const blob = await canvasToBlob(canvas);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = blob ? URL.createObjectURL(blob) : null;
-    if (previewUrl) els.ocrPreview.src = previewUrl;
-    els.ocrPreview.hidden = !previewUrl;
-    const text = await ocr.recognize(canvas, state.settings.lang, (p) => { if (token === ocrToken) setOcrProgress(p); });
+    const width = canvas.width, height = canvas.height;
+    const { text, words } = await ocr.recognize(canvas, state.settings.lang, (p) => { if (token === ocrToken) setOcrProgress(p); });
     if (token !== ocrToken) return;
     els.ocrText.value = cleanOcrText(text);
     els.ocrProgress.hidden = true;
     els.ocrResult.hidden = false;
-    if (!els.ocrText.value) toast('No se reconoció texto. Prueba con más luz o más cerca.', { ms: 4000 });
+    picker.load({ imgUrl: previewUrl, width, height, words });
+    els.ocrResult.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!words.length) toast('No se reconoció texto. Prueba con más luz o más cerca.', { ms: 4000 });
   } catch (err) {
     if (token !== ocrToken) return;
     console.error(err);
@@ -446,8 +497,8 @@ function cleanOcrText(t) {
 function closeOcrPanel() {
   els.ocrPanel.hidden = true;
   els.ocrText.value = '';
+  picker.reset();
   if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
-  els.ocrPreview.removeAttribute('src');
 }
 
 function captureForOcr() {
@@ -513,7 +564,7 @@ function setMode(mode) {
 function exportClick(preferShare) {
   if (!state.records.length) { toast('No hay escaneos que exportar.'); return; }
   // Se genera en memoria y de forma síncrona para no perder el gesto del usuario (Safari).
-  const csv = buildCsv(state.records, { sep: state.settings.sep, protectNumbers: state.settings.protect });
+  const csv = buildCsv(state.records, { sep: state.settings.sep, protectNumbers: state.settings.protect, fieldOrder: state.settings.fields });
   exportCsv(csv, csvFileName(), { preferShare }).then((r) => {
     if (r === 'downloaded') toast('CSV descargado.');
     else if (r === 'shared') toast('CSV compartido.');
@@ -652,6 +703,15 @@ function bindEvents() {
     closeOcrPanel();
   });
   els.ocrDiscard.addEventListener('click', closeOcrPanel);
+  els.ocrSaveFields.addEventListener('click', async () => {
+    const fields = picker.result();
+    if (!fields) {
+      toast(state.settings.fields.length ? 'Asigna al menos un dato a un campo.' : 'Crea un campo y toca los datos en la foto.');
+      return;
+    }
+    await addRecords([{ id: newId(), type: 'ocr', format: 'OCR', value: '', fields, note: '', createdAt: Date.now() }]);
+    closeOcrPanel();
+  });
   els.ocrSave.addEventListener('click', async () => {
     const value = els.ocrText.value.trim();
     if (!value) { toast('No hay texto que guardar.'); return; }
@@ -744,6 +804,7 @@ async function init() {
   try {
     const saved = await db.getSetting('prefs');
     if (saved && typeof saved === 'object') Object.assign(state.settings, saved);
+    if (!Array.isArray(state.settings.fields)) state.settings.fields = [];
   } catch (err) { console.warn(err); }
   applySettingsToUi();
 
