@@ -1,21 +1,31 @@
-// Selección de campos sobre la imagen del OCR.
-// El usuario define campos (columnas del CSV), elige uno y toca/arrastra sobre las palabras
-// detectadas para asignarlas. El valor de cada campo se puede corregir a mano.
+// Selección de campos sobre la imagen del OCR (editor a pantalla completa).
+// - Un dedo: tocar una palabra la asigna/quita del campo activo; arrastrar = recuadro de selección.
+// - Dos dedos: ampliar y mover la imagen. Botones +/− como alternativa.
 
 export const FIELD_COLORS = ['#0f766e', '#c2410c', '#7c3aed', '#2563eb', '#be185d', '#15803d', '#a16207', '#0e7490', '#b91c1c', '#4d7c0f'];
-const RESERVED = ['fecha', 'tipo', 'formato', 'valor', 'nota'];
+export const RESERVED = ['fecha', 'tipo', 'formato', 'valor', 'nota'];
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DRAG_PX = 10;
+const MAX_SCALE = 6;
 
 export function colorFor(fields, name) {
   const i = fields.indexOf(name);
   return FIELD_COLORS[(i < 0 ? 0 : i) % FIELD_COLORS.length];
 }
 
+// Valida un nombre de campo nuevo. Devuelve { name } o { error }.
+export function validateFieldName(raw, fields) {
+  const name = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!name) return { error: 'Escribe un nombre.' };
+  if (RESERVED.includes(name.toLowerCase())) return { error: `«${name}» ya es una columna del CSV. Usa otro nombre.` };
+  if (fields.some((f) => f.toLowerCase() === name.toLowerCase())) return { error: `El campo «${name}» ya existe.` };
+  return { name };
+}
+
 export class FieldPicker {
   /**
-   * @param {object} els  elementos del DOM
-   * @param {object} opts { getFields(): string[], setFields(string[]), toast(msg) }
+   * @param {object} els elementos del DOM
+   * @param {object} opts { getFields(), toast(msg), requestAddField() }
    */
   constructor(els, opts) {
     this.els = els;
@@ -26,9 +36,10 @@ export class FieldPicker {
     this.active = null;
     this.assign = new Map(); // índice de palabra → campo
     this.manual = new Map(); // campo → texto escrito a mano
-    this.editMode = false;
-    this.zoomed = false;
-    this.drag = null;
+    // Vista: escala base (encajar) * zoom, desplazamiento en px de pantalla.
+    this.view = { base: 1, zoom: 1, tx: 0, ty: 0 };
+    this.pointers = new Map();
+    this.gesture = null;
     this._bind();
   }
 
@@ -41,15 +52,31 @@ export class FieldPicker {
     this.height = height || 1;
     this.assign.clear();
     this.manual.clear();
-    this.editMode = false;
-    this.setZoom(false);
     if (!this.fields.includes(this.active)) this.active = this.fields[0] || null;
-    if (imgUrl) this.els.img.src = imgUrl;
-    this.els.svg.setAttribute('viewBox', `0 0 ${this.width} ${this.height}`);
-    this.els.svg.setAttribute('preserveAspectRatio', 'none');
-    // Sin ampliar, la imagen entera cabe en el alto disponible.
-    this.els.wrap.style.maxWidth = `calc(60vh * ${(this.width / this.height).toFixed(4)})`;
+    const { wrap, svg, img } = this.els;
+    wrap.style.width = `${this.width}px`;
+    wrap.style.height = `${this.height}px`;
+    if (imgUrl) img.src = imgUrl;
+    svg.setAttribute('viewBox', `0 0 ${this.width} ${this.height}`);
+    this.fit();
+    this.els.hint.classList.remove('fade');
+    clearTimeout(this._hintTimer);
+    this._hintTimer = setTimeout(() => this.els.hint.classList.add('fade'), 5000);
     this.renderAll();
+  }
+
+  // Muestra solo la imagen (mientras el OCR trabaja).
+  preview({ imgUrl, width, height }) {
+    this.words = [];
+    this.width = width || 1;
+    this.height = height || 1;
+    const { wrap, svg, img } = this.els;
+    wrap.style.width = `${this.width}px`;
+    wrap.style.height = `${this.height}px`;
+    if (imgUrl) img.src = imgUrl;
+    svg.setAttribute('viewBox', `0 0 ${this.width} ${this.height}`);
+    svg.replaceChildren();
+    this.fit();
   }
 
   reset() {
@@ -57,7 +84,6 @@ export class FieldPicker {
     this.assign.clear();
     this.manual.clear();
     this.els.svg.replaceChildren();
-    this.els.values.replaceChildren();
     this.els.img.removeAttribute('src');
   }
 
@@ -79,85 +105,128 @@ export class FieldPicker {
     return parts.join(' ');
   }
 
+  filledCount() { return this.fields.filter((f) => this.valueOf(f).trim()).length; }
+
   // --- Campos ----------------------------------------------------------------
-  addField(name) {
-    const n = String(name || '').replace(/\s+/g, ' ').trim();
-    if (!n) return false;
-    const lower = n.toLowerCase();
-    if (RESERVED.includes(lower)) { this.opts.toast(`«${n}» ya es una columna del CSV. Usa otro nombre.`); return false; }
-    if (this.fields.some((f) => f.toLowerCase() === lower)) { this.opts.toast(`El campo «${n}» ya existe.`); this.active = this.fields.find((f) => f.toLowerCase() === lower); this.renderAll(); return false; }
-    this.opts.setFields([...this.fields, n]);
-    this.active = n;
+  fieldsChanged(newActive) {
+    const fields = this.fields;
+    for (const [i, f] of [...this.assign]) if (!fields.includes(f)) this.assign.delete(i);
+    for (const f of [...this.manual.keys()]) if (!fields.includes(f)) this.manual.delete(f);
+    if (newActive && fields.includes(newActive)) this.active = newActive;
+    if (!fields.includes(this.active)) this.active = fields[0] || null;
     this.renderAll();
+  }
+
+  setActive(name, { scroll = true } = {}) {
+    this.active = name;
+    this.renderChips(scroll);
+    this.renderActive();
+  }
+
+  next() {
+    const fields = this.fields;
+    if (!fields.length) return false;
+    const i = fields.indexOf(this.active);
+    // Siguiente campo vacío; si no hay, el siguiente en orden.
+    for (let k = 1; k <= fields.length; k++) {
+      const f = fields[(i + k) % fields.length];
+      if (!this.valueOf(f).trim()) { this.setActive(f); return true; }
+    }
+    if (i === fields.length - 1) return false; // todo relleno y estamos en el último
+    this.setActive(fields[(i + 1) % fields.length]);
     return true;
   }
 
-  removeField(name) {
-    this.opts.setFields(this.fields.filter((f) => f !== name));
-    for (const [i, f] of [...this.assign]) if (f === name) this.assign.delete(i);
-    this.manual.delete(name);
-    if (this.active === name) this.active = this.fields[0] || null;
-    if (!this.fields.length) this.editMode = false;
-    this.renderAll();
+  clearActive() {
+    const f = this.active;
+    if (!f) return;
+    for (const [i, ff] of [...this.assign]) if (ff === f) this.assign.delete(i);
+    this.manual.delete(f);
+    this.renderOverlay();
+    this.renderChips(false);
+    this.renderActive();
   }
 
-  setActive(name) {
-    if (this.active === name) return;
-    this.active = name;
-    this.renderChips();
-    this.renderValues(false);
-  }
-
-  setZoom(on) {
-    this.zoomed = !!on;
-    this.els.stage.classList.toggle('zoomed', this.zoomed);
-    this.els.zoomBtn.setAttribute('aria-pressed', String(this.zoomed));
-    this.els.zoomBtn.textContent = this.zoomed ? 'Reducir' : 'Ampliar';
-    this.els.stageHint.textContent = this.zoomed
-      ? 'Desliza para moverte y toca las palabras.'
-      : 'Toca una palabra o arrastra un recuadro para seleccionar varias.';
+  setManual(value) {
+    if (!this.active) return;
+    this.manual.set(this.active, value);
+    this.renderChips(false);
   }
 
   // --- Asignación ------------------------------------------------------------
-  _ensureActive() {
-    if (!this.fields.length) {
-      this.opts.toast('Primero crea un campo (p. ej. «Total»).');
-      this.showAddForm();
-      return false;
-    }
-    if (!this.active) this.active = this.fields[0];
-    return true;
-  }
-
   toggleWords(indices) {
-    if (!indices.length || !this._ensureActive()) return;
+    if (!indices.length) return;
+    if (!this.fields.length) { this.opts.requestAddField(); return; }
+    if (!this.active) this.active = this.fields[0];
     const f = this.active;
     const allMine = indices.every((i) => this.assign.get(i) === f);
-    const ordered = [...indices].sort((a, b) => a - b);
-    for (const i of ordered) {
+    for (const i of [...indices].sort((a, b) => a - b)) {
+      const word = this.words[i].text;
       if (allMine) {
         this.assign.delete(i);
-        if (this.manual.has(f)) this.manual.set(f, removeOnce(this.manual.get(f), this.words[i].text));
+        if (this.manual.has(f)) this.manual.set(f, removeOnce(this.manual.get(f), word));
       } else if (this.assign.get(i) !== f) {
         const prev = this.assign.get(i);
-        if (prev && this.manual.has(prev)) this.manual.set(prev, removeOnce(this.manual.get(prev), this.words[i].text));
+        if (prev && this.manual.has(prev)) this.manual.set(prev, removeOnce(this.manual.get(prev), word));
         this.assign.set(i, f);
-        if (this.manual.has(f)) this.manual.set(f, (this.manual.get(f) + ' ' + this.words[i].text).trim());
+        if (this.manual.has(f)) this.manual.set(f, (this.manual.get(f) + ' ' + word).trim());
       }
     }
+    if (typeof navigator.vibrate === 'function') { try { navigator.vibrate(15); } catch { /* ignorar */ } }
     this.renderOverlay();
-    this.renderValues(false);
+    this.renderChips(false);
+    this.renderActive();
+  }
+
+  // --- Vista (zoom y desplazamiento) ---------------------------------------------
+  fit() {
+    const r = this.els.stage.getBoundingClientRect();
+    const sw = r.width || 1, sh = r.height || 1;
+    this.view.base = Math.min(sw / this.width, sh / this.height);
+    this.view.zoom = 1;
+    this.view.tx = (sw - this.width * this.view.base) / 2;
+    this.view.ty = (sh - this.height * this.view.base) / 2;
+    this.applyView();
+  }
+
+  zoomBy(factor, cx, cy) {
+    const r = this.els.stage.getBoundingClientRect();
+    if (cx == null) { cx = r.width / 2; cy = r.height / 2; }
+    const v = this.view;
+    const oldS = v.base * v.zoom;
+    const zoom = Math.min(MAX_SCALE, Math.max(1, v.zoom * factor));
+    const s = v.base * zoom;
+    // Mantener fijo el punto (cx, cy) de la pantalla.
+    v.tx = cx - (cx - v.tx) * (s / oldS);
+    v.ty = cy - (cy - v.ty) * (s / oldS);
+    v.zoom = zoom;
+    this.clamp();
+    this.applyView();
+  }
+
+  clamp() {
+    const r = this.els.stage.getBoundingClientRect();
+    const v = this.view;
+    const s = v.base * v.zoom;
+    const w = this.width * s, h = this.height * s;
+    v.tx = w <= r.width ? (r.width - w) / 2 : Math.min(0, Math.max(r.width - w, v.tx));
+    v.ty = h <= r.height ? (r.height - h) / 2 : Math.min(0, Math.max(r.height - h, v.ty));
+  }
+
+  applyView() {
+    const v = this.view;
+    this.els.wrap.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.base * v.zoom})`;
   }
 
   // --- Render ------------------------------------------------------------------
   renderAll() {
-    this.renderChips();
+    this.renderChips(true);
     this.renderOverlay();
-    this.renderValues(true);
+    this.renderActive();
   }
 
-  renderChips() {
-    const { chips, noFieldsHint, editBtn, help } = this.els;
+  renderChips(scroll) {
+    const { chips, noFieldsHint, activeRow, progress } = this.els;
     const fields = this.fields;
     const frag = document.createDocumentFragment();
     fields.forEach((f) => {
@@ -165,17 +234,18 @@ export class FieldPicker {
       b.type = 'button';
       b.className = 'chip';
       b.setAttribute('role', 'radio');
-      b.setAttribute('aria-checked', String(!this.editMode && f === this.active));
+      b.setAttribute('aria-checked', String(f === this.active));
       b.style.setProperty('--c', colorFor(fields, f));
       b.dataset.field = f;
-      b.append(document.createTextNode(f));
-      if (this.editMode) {
-        const x = document.createElement('span');
-        x.className = 'chip-x';
-        x.textContent = '✕';
-        b.append(x);
-        b.setAttribute('aria-label', `Quitar campo ${f}`);
-      }
+      const name = document.createElement('span');
+      name.className = 'chip-name';
+      name.textContent = f;
+      const val = document.createElement('span');
+      val.className = 'chip-val';
+      const v = this.valueOf(f).trim();
+      val.textContent = v || '—';
+      if (v) b.classList.add('filled');
+      b.append(name, val);
       frag.appendChild(b);
     });
     const add = document.createElement('button');
@@ -186,159 +256,143 @@ export class FieldPicker {
     frag.appendChild(add);
     chips.replaceChildren(frag);
     noFieldsHint.hidden = fields.length > 0;
-    editBtn.hidden = fields.length === 0;
-    editBtn.textContent = this.editMode ? 'Listo' : 'Editar campos';
-    editBtn.setAttribute('aria-pressed', String(this.editMode));
-    help.textContent = this.editMode
-      ? 'Toca ✕ para quitar un campo de la lista.'
-      : fields.length ? '1. Elige un campo · 2. Toca las palabras en la foto' : 'Crea los campos que quieres extraer';
-    help.hidden = !fields.length;
+    activeRow.hidden = fields.length === 0;
+    progress.textContent = fields.length ? `${this.filledCount()} de ${fields.length} campos` : '';
+    if (scroll) {
+      const el = chips.querySelector('[aria-checked="true"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    }
+  }
+
+  renderActive() {
+    const { activeLabel, activeInput, activeNext } = this.els;
+    const f = this.active;
+    activeLabel.textContent = f || '';
+    activeLabel.style.color = f ? colorFor(this.fields, f) : '';
+    if (document.activeElement !== activeInput) activeInput.value = f ? this.valueOf(f) : '';
+    const last = this.fields.indexOf(f) === this.fields.length - 1;
+    activeNext.setAttribute('aria-label', last ? 'Terminar' : 'Siguiente campo');
   }
 
   renderOverlay() {
-    const svg = this.els.svg;
     const fields = this.fields;
     const frag = document.createDocumentFragment();
     this.words.forEach((w, i) => {
       const r = document.createElementNS(SVG_NS, 'rect');
-      r.setAttribute('x', w.x0 - 2);
-      r.setAttribute('y', w.y0 - 2);
-      r.setAttribute('width', Math.max(1, w.x1 - w.x0 + 4));
-      r.setAttribute('height', Math.max(1, w.y1 - w.y0 + 4));
-      r.setAttribute('rx', 3);
+      const pad = 3;
+      r.setAttribute('x', w.x0 - pad);
+      r.setAttribute('y', w.y0 - pad);
+      r.setAttribute('width', Math.max(1, w.x1 - w.x0 + pad * 2));
+      r.setAttribute('height', Math.max(1, w.y1 - w.y0 + pad * 2));
+      r.setAttribute('rx', 4);
       const f = this.assign.get(i);
       if (f) {
         const c = colorFor(fields, f);
         r.setAttribute('class', 'w sel');
         r.style.fill = c;
-        r.style.fillOpacity = '0.35';
+        r.style.fillOpacity = '0.38';
         r.style.stroke = c;
       } else {
         r.setAttribute('class', 'w');
       }
       frag.appendChild(r);
     });
-    if (this.drag && this.drag.moved) {
+    const g = this.gesture;
+    if (g && g.type === 'marquee' && g.moved) {
       const m = document.createElementNS(SVG_NS, 'rect');
-      const { x, y, w, h } = normRect(this.drag.start, this.drag.cur);
+      const { x, y, w, h } = normRect(g.start, g.cur);
       m.setAttribute('class', 'marquee');
       m.setAttribute('x', x); m.setAttribute('y', y); m.setAttribute('width', w); m.setAttribute('height', h);
       frag.appendChild(m);
     }
-    svg.replaceChildren(frag);
-  }
-
-  // rebuild=false → actualiza valores sin recrear los inputs (no se pierde el foco).
-  renderValues(rebuild) {
-    const box = this.els.values;
-    const fields = this.fields;
-    if (!rebuild && box.children.length === fields.length) {
-      [...box.children].forEach((row) => {
-        const f = row.dataset.field;
-        row.classList.toggle('active', f === this.active);
-        const input = row.querySelector('input');
-        if (document.activeElement !== input) input.value = this.valueOf(f);
-      });
-      return;
-    }
-    const frag = document.createDocumentFragment();
-    fields.forEach((f) => {
-      const row = document.createElement('div');
-      row.className = 'fv' + (f === this.active ? ' active' : '');
-      row.dataset.field = f;
-      row.style.setProperty('--c', colorFor(fields, f));
-      const label = document.createElement('label');
-      label.className = 'fv-label';
-      const id = 'fv-' + Math.random().toString(36).slice(2, 8);
-      label.htmlFor = id;
-      label.textContent = f;
-      const line = document.createElement('div');
-      line.className = 'fv-row';
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.id = id;
-      input.autocomplete = 'off';
-      input.spellcheck = false;
-      input.placeholder = 'Toca palabras en la foto o escribe';
-      input.value = this.valueOf(f);
-      input.addEventListener('focus', () => this.setActive(f));
-      input.addEventListener('input', () => { this.manual.set(f, input.value); });
-      const clear = document.createElement('button');
-      clear.type = 'button';
-      clear.className = 'btn btn-secondary fv-clear';
-      clear.setAttribute('aria-label', `Vaciar ${f}`);
-      clear.textContent = '✕';
-      clear.addEventListener('click', () => {
-        for (const [i, ff] of [...this.assign]) if (ff === f) this.assign.delete(i);
-        this.manual.delete(f);
-        input.value = '';
-        this.setActive(f);
-        this.renderOverlay();
-      });
-      line.append(input, clear);
-      row.append(label, line);
-      frag.appendChild(row);
-    });
-    box.replaceChildren(frag);
-  }
-
-  showAddForm() {
-    this.els.addForm.hidden = false;
-    this.els.addInput.value = '';
-    this.els.addInput.focus();
+    this.els.svg.replaceChildren(frag);
   }
 
   // --- Eventos -------------------------------------------------------------------
   _bind() {
-    const { chips, editBtn, addForm, addInput, addCancel, svg, zoomBtn } = this.els;
+    const { chips, stage, zoomIn, zoomOut, activeInput, activeClear, activeNext } = this.els;
 
     chips.addEventListener('click', (e) => {
       const b = e.target.closest('.chip');
       if (!b) return;
-      if (b.dataset.add) { this.showAddForm(); return; }
-      if (this.editMode) this.removeField(b.dataset.field);
-      else this.setActive(b.dataset.field);
+      if (b.dataset.add) { this.opts.requestAddField(); return; }
+      this.setActive(b.dataset.field);
     });
-    editBtn.addEventListener('click', () => { this.editMode = !this.editMode; this.renderChips(); });
-    addForm.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (this.addField(addInput.value)) { addForm.hidden = true; addInput.blur(); }
+    zoomIn.addEventListener('click', () => this.zoomBy(1.6));
+    zoomOut.addEventListener('click', () => this.zoomBy(1 / 1.6));
+    activeInput.addEventListener('input', () => this.setManual(activeInput.value));
+    activeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); if (!this.next()) activeInput.blur(); }
     });
-    addCancel.addEventListener('click', () => { addForm.hidden = true; });
-    zoomBtn.addEventListener('click', () => this.setZoom(!this.zoomed));
+    activeClear.addEventListener('click', () => this.clearActive());
+    activeNext.addEventListener('click', () => {
+      if (!this.next()) this.opts.onDone && this.opts.onDone();
+    });
+    window.addEventListener('resize', () => { if (this.words.length || this.els.img.getAttribute('src')) { this.clamp(); this.applyView(); } });
 
-    const toImg = (e) => {
-      const r = svg.getBoundingClientRect();
-      return {
-        x: (e.clientX - r.left) * (this.width / (r.width || 1)),
-        y: (e.clientY - r.top) * (this.height / (r.height || 1)),
-        sx: e.clientX, sy: e.clientY, scale: this.width / (r.width || 1),
-      };
+    // Coordenadas de pantalla → imagen.
+    const toImg = (cx, cy) => {
+      const r = this.els.svg.getBoundingClientRect();
+      return { x: (cx - r.left) * (this.width / (r.width || 1)), y: (cy - r.top) * (this.height / (r.height || 1)), sx: cx, sy: cy, scale: this.width / (r.width || 1) };
     };
+    const stageXY = (cx, cy) => { const r = stage.getBoundingClientRect(); return { x: cx - r.left, y: cy - r.top }; };
 
-    svg.addEventListener('pointerdown', (e) => {
+    stage.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      const p = toImg(e);
-      this.drag = { id: e.pointerId, start: p, cur: p, moved: false };
-      if (!this.zoomed) { try { svg.setPointerCapture(e.pointerId); } catch { /* ignorar */ } }
-    });
-    svg.addEventListener('pointermove', (e) => {
-      const d = this.drag;
-      if (!d || d.id !== e.pointerId) return;
-      d.cur = toImg(e);
-      if (!d.moved && Math.hypot(d.cur.sx - d.start.sx, d.cur.sy - d.start.sy) > DRAG_PX) {
-        if (this.zoomed) { this.drag = null; return; } // en modo ampliado, arrastrar = desplazarse
-        d.moved = true;
+      try { stage.setPointerCapture(e.pointerId); } catch { /* ignorar */ }
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pointers.size === 1) {
+        this.gesture = { type: 'marquee', id: e.pointerId, start: toImg(e.clientX, e.clientY), cur: null, moved: false };
+        this.gesture.cur = this.gesture.start;
+      } else if (this.pointers.size === 2) {
+        // Empieza el pellizco: se cancela cualquier selección.
+        const [a, b] = [...this.pointers.values()];
+        const mid = stageXY((a.x + b.x) / 2, (a.y + b.y) / 2);
+        this.gesture = {
+          type: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoom0: this.view.zoom,
+          mid0: mid, tx0: this.view.tx, ty0: this.view.ty,
+        };
+        this.renderOverlay();
       }
-      if (d.moved) { e.preventDefault(); this.renderOverlay(); }
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const g = this.gesture;
+      if (!g) return;
+      if (g.type === 'pinch' && this.pointers.size >= 2) {
+        const [a, b] = [...this.pointers.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        const mid = stageXY((a.x + b.x) / 2, (a.y + b.y) / 2);
+        const v = this.view;
+        const zoom = Math.min(MAX_SCALE, Math.max(1, g.zoom0 * d / g.d0));
+        const k = zoom / g.zoom0;
+        v.zoom = zoom;
+        v.tx = mid.x - (g.mid0.x - g.tx0) * k;
+        v.ty = mid.y - (g.mid0.y - g.ty0) * k;
+        this.clamp();
+        this.applyView();
+      } else if (g.type === 'marquee' && g.id === e.pointerId) {
+        g.cur = toImg(e.clientX, e.clientY);
+        if (!g.moved && Math.hypot(g.cur.sx - g.start.sx, g.cur.sy - g.start.sy) > DRAG_PX) g.moved = true;
+        if (g.moved) this.renderOverlay();
+      }
     });
     const end = (e, cancelled) => {
-      const d = this.drag;
-      if (!d || d.id !== e.pointerId) return;
-      this.drag = null;
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.delete(e.pointerId);
+      const g = this.gesture;
+      if (!g) return;
+      if (g.type === 'pinch') {
+        if (this.pointers.size === 0) this.gesture = null;
+        return; // tras un pellizco no se selecciona nada hasta levantar todos los dedos
+      }
+      if (g.id !== e.pointerId) return;
+      this.gesture = null;
       if (cancelled) { this.renderOverlay(); return; }
-      if (d.moved) {
-        const r = normRect(d.start, d.cur);
+      if (g.moved) {
+        const r = normRect(g.start, g.cur);
         const hits = [];
         this.words.forEach((w, i) => {
           const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
@@ -347,12 +401,21 @@ export class FieldPicker {
         this.renderOverlay();
         this.toggleWords(hits);
       } else {
-        const i = this.hitTest(d.start.x, d.start.y, 10 * d.start.scale);
+        const i = this.hitTest(g.start.x, g.start.y, 12 * g.start.scale);
         if (i >= 0) this.toggleWords([i]);
       }
+      this.els.hint.classList.add('fade');
     };
-    svg.addEventListener('pointerup', (e) => end(e, false));
-    svg.addEventListener('pointercancel', (e) => end(e, true));
+    stage.addEventListener('pointerup', (e) => end(e, false));
+    stage.addEventListener('pointercancel', (e) => end(e, true));
+    // Rueda / trackpad en escritorio.
+    stage.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const p = stageXY(e.clientX, e.clientY);
+      this.zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x, p.y);
+    }, { passive: false });
+    // Safari iOS: evita su gesto de zoom de página dentro del lienzo.
+    stage.addEventListener('gesturestart', (e) => e.preventDefault());
   }
 
   hitTest(x, y, tol) {

@@ -5,14 +5,17 @@ Funciona en Safari iOS 16+ y Chrome Android, en el navegador o instalada en la p
 
 ## Uso
 
-1. **Código de barras**: «Iniciar cámara» y centra el código en el marco. Se guarda solo (con sonido y «Deshacer»).
-2. **Texto (OCR)**: cambia a «Texto (OCR)», encuadra y pulsa «Capturar texto». Después eliges qué datos te interesan:
-   - Crea tus **campos** con «+ Campo» (p. ej. «Nº factura», «Cliente», «Total», «Lote», «Caducidad»). Se recuerdan para la próxima vez; «Editar campos» permite quitarlos.
-   - Elige un campo y **toca las palabras** en la foto (o arrastra un recuadro para coger varias). Tocar otra vez una palabra la quita. «Ampliar» agranda la imagen para textos pequeños.
-   - Corrige el valor a mano si hace falta y pulsa **«Guardar fila»**: cada documento es una fila y cada campo, una columna del CSV.
+La app tiene tres pestañas abajo: **Escanear**, **Lista** y **Ajustes**.
+
+1. **Código de barras**: «Activar cámara» (la próxima vez se activa sola) y apunta al código. Se guarda solo; abajo aparece el último código con «Deshacer». El botón central pausa/reanuda el escaneo.
+2. **Texto (OCR)**: cambia a «Texto», encuadra el documento y pulsa el disparador. Se abre el editor a pantalla completa para elegir los datos:
+   - Crea tus **campos** con «+ Campo» (p. ej. «Nº factura», «Cliente», «Total», «Lote», «Caducidad»). Se recuerdan para la próxima vez; se quitan en Ajustes › Campos del OCR.
+   - Elige un campo en la barra inferior y **toca las palabras** en la foto (o arrastra un recuadro para coger varias). Tocar otra vez una palabra la quita. **Dos dedos** amplían y mueven la imagen (o botones +/−).
+   - Corrige el valor a mano si hace falta; «›» pasa al siguiente campo vacío. Pulsa **«Guardar»**: cada documento es una fila y cada campo, una columna del CSV.
+   - El botón/gesto «atrás» de Android cierra el editor (pide confirmación si hay datos).
    - En «Texto completo» sigue disponible guardar todo el texto (una fila o una fila por línea).
-3. **Desde foto**: analiza una imagen de la galería (código u OCR, según el modo).
-4. **Exportar CSV**: abre el menú Compartir del sistema (guardar en Archivos, enviar por correo, WhatsApp, Drive…). «Descargar» guarda el archivo directamente.
+3. **Galería** (botón de la izquierda): analiza una foto ya hecha (código u OCR, según el modo).
+4. **Lista › Exportar CSV**: abre el menú Compartir del sistema (guardar en Archivos, enviar por correo, WhatsApp, Drive…). «Descargar» guarda el archivo directamente.
 
 Toca un escaneo para editarlo, añadirle una nota o borrarlo.
 

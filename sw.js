@@ -1,5 +1,5 @@
 /* Service worker de ScannerCSV: app shell en caché + caché en tiempo de ejecución del motor OCR. */
-const VERSION = 'v1.1.0';
+const VERSION = 'v2.0.0-dev';
 const SHELL_CACHE = `scannercsv-shell-${VERSION}`;
 const RUNTIME_CACHE = 'scannercsv-runtime-v1';
 
