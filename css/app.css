@@ -17,6 +17,7 @@
   --info-text: #0b4d47;
   --ok: #22c55e;
   --warn-strong: #b45309;
+  --ok-strong: #15803d;
   --radius: 16px;
   --tap: 48px;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -31,13 +32,13 @@
   :root:not([data-theme="light"]) {
     --bg: #0a0f10; --surface: #151c1e; --surface-2: #20292b; --text: #e8eff0; --muted: #93a4a6;
     --border: #283335; --primary: #2bb3a6; --primary-press: #24978c; --on-primary: #03201d;
-    --warn-strong: #fbbf24; --danger: #ff7a6e; --warn-bg: #3a2e0c; --warn-text: #ffd98a; --info-bg: #0f2f2c; --info-text: #a9e7df;
+    --ok-strong: #4ade80; --warn-strong: #fbbf24; --danger: #ff7a6e; --warn-bg: #3a2e0c; --warn-text: #ffd98a; --info-bg: #0f2f2c; --info-text: #a9e7df;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0a0f10; --surface: #151c1e; --surface-2: #20292b; --text: #e8eff0; --muted: #93a4a6;
   --border: #283335; --primary: #2bb3a6; --primary-press: #24978c; --on-primary: #03201d;
-  --warn-strong: #fbbf24; --danger: #ff7a6e; --warn-bg: #3a2e0c; --warn-text: #ffd98a; --info-bg: #0f2f2c; --info-text: #a9e7df;
+  --ok-strong: #4ade80; --warn-strong: #fbbf24; --danger: #ff7a6e; --warn-bg: #3a2e0c; --warn-text: #ffd98a; --info-bg: #0f2f2c; --info-text: #a9e7df;
 }
 
 * { box-sizing: border-box; }
@@ -346,6 +347,8 @@ body.editing .tabbar { display: none; }
 .ed-overlay .w { fill: rgba(255,255,255,.001); stroke: rgba(43,179,166,.75); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .ed-overlay .w.sel { stroke-width: 2.5; }
 .ed-overlay .w.low { stroke: #f59e0b; stroke-dasharray: 5 3; }
+.ed-overlay .w.bc { stroke: #3b82f6; stroke-width: 2.5; stroke-dasharray: 8 4; fill: rgba(59,130,246,.12); }
+.ed-overlay .w.bc.sel { stroke-dasharray: none; }
 .ed-overlay .marquee { fill: rgba(255,213,74,.18); stroke: #ffd54a; stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .ed-zoom { position: absolute; right: calc(12px + var(--safe-right)); top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .ed-hint {
@@ -401,6 +404,8 @@ body.editing .tabbar { display: none; }
 .active-hint { margin: 0; min-height: 1.2em; font-size: .82rem; color: var(--muted); }
 .active-hint.warn { color: var(--warn-strong); font-weight: 600; }
 .active-hint.busy { color: var(--primary); }
+.active-hint.ok { color: var(--ok-strong); font-weight: 600; }
+.chip.verified:not([aria-checked="true"]) .chip-val { color: var(--ok-strong); }
 .chip.pending .chip-val { animation: blink 1s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: .35; } }
 .chip.doubt:not([aria-checked="true"]) .chip-val { color: var(--warn-strong); }

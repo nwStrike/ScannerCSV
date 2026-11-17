@@ -3,6 +3,7 @@
 // - Dos dedos: ampliar y mover la imagen. Botones +/− como alternativa.
 
 import { cleanValue, FIELD_TYPES } from './fieldtypes.js';
+import { barcodeDisplay } from './barcodematch.js';
 
 const DOUBT_CONF = 72; // por debajo, se avisa de «lectura dudosa»
 const LOW_WORD_CONF = 60;
@@ -91,6 +92,28 @@ export class FieldPicker {
     this.fit();
   }
 
+  // Añade los códigos de barras encontrados en la foto como «palabras» que se pueden tocar.
+  setBarcodes(barcodes) {
+    const text = this.words.filter((w) => !w.bc);
+    const bcs = (barcodes || []).map((b) => ({
+      text: barcodeDisplay(b, text), raw: b.text, format: b.format,
+      x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, line: -1, conf: 100, bc: true,
+    }));
+    // «Palabras» que el OCR inventa sobre las barras: se ocultan (no se pintan ni se pueden tocar).
+    text.forEach((w, i) => {
+      const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
+      w.hidden = bcs.some((b) => cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1);
+      if (w.hidden) this.assign.delete(i);
+    });
+    // Las palabras de texto conservan sus índices (los códigos van al final).
+    this.words = text.concat(bcs);
+    this.renderOverlay();
+    // Los campos ya asignados se vuelven a contrastar con los códigos.
+    this.fields.forEach((f) => { this.refined.delete(f); this.scheduleRefine(f); });
+    this.renderChips(false);
+    this.renderActive();
+  }
+
   reset() {
     this.words = [];
     this.assign.clear();
@@ -147,6 +170,12 @@ export class FieldPicker {
     return idx.reduce((a, i) => a + (this.words[i].conf || 0), 0) / idx.length;
   }
 
+  isVerified(field) {
+    if (this.manual.has(field)) return false;
+    const r = this.refined.get(field);
+    return !!(r && r.src === 'barcode' && r.key === this.indicesOf(field).join(','));
+  }
+
   // Relee el campo con más precisión (con un pequeño retardo mientras el usuario sigue tocando).
   scheduleRefine(field) {
     clearTimeout(this.refineTimers.get(field));
@@ -162,7 +191,7 @@ export class FieldPicker {
       try { r = await this.opts.refine(field, idx); } catch (err) { console.warn('refine', err); }
       if (this.indicesOf(field).join(',') !== key) return; // cambió mientras leía
       this.pending.delete(field);
-      if (r && r.text) this.refined.set(field, { key, text: r.text, conf: r.conf });
+      if (r && r.text) this.refined.set(field, { key, text: r.text, conf: r.conf, src: r.src });
       this.renderChips(false);
       this.renderActive();
     }, 300));
@@ -343,7 +372,9 @@ export class FieldPicker {
       const v = this.valueOf(f).trim();
       const conf = this.confOf(f);
       const doubt = v && conf != null && conf < DOUBT_CONF && !this.pending.has(f);
-      val.textContent = (doubt ? '⚠ ' : '') + (v || '—');
+      const ok = v && this.isVerified(f);
+      val.textContent = (ok ? '✓ ' : doubt ? '⚠ ' : '') + (v || '—');
+      if (ok) b.classList.add('verified');
       if (v) b.classList.add('filled');
       if (this.pending.has(f)) b.classList.add('pending');
       if (doubt) b.classList.add('doubt');
@@ -375,6 +406,7 @@ export class FieldPicker {
       const v = f ? this.valueOf(f).trim() : '';
       const conf = f ? this.confOf(f) : null;
       if (f && this.pending.has(f)) { activeHint.textContent = 'Releyendo con más precisión…'; activeHint.className = 'active-hint busy'; }
+      else if (v && this.isVerified(f)) { activeHint.textContent = '✓ Verificado con el código de barras de la etiqueta'; activeHint.className = 'active-hint ok'; }
       else if (v && conf != null && conf < DOUBT_CONF) { activeHint.textContent = 'Lectura dudosa: compárala con la foto y corrígela si hace falta.'; activeHint.className = 'active-hint warn'; }
       else { activeHint.textContent = ''; activeHint.className = 'active-hint'; }
     }
@@ -388,6 +420,7 @@ export class FieldPicker {
     const fields = this.fields;
     const frag = document.createDocumentFragment();
     this.words.forEach((w, i) => {
+      if (w.hidden) return;
       const r = document.createElementNS(SVG_NS, 'rect');
       const pad = 3;
       r.setAttribute('x', w.x0 - pad);
@@ -398,12 +431,12 @@ export class FieldPicker {
       const f = this.assign.get(i);
       if (f) {
         const c = colorFor(fields, f);
-        r.setAttribute('class', 'w sel');
+        r.setAttribute('class', w.bc ? 'w sel bc' : 'w sel');
         r.style.fill = c;
         r.style.fillOpacity = '0.38';
         r.style.stroke = c;
       } else {
-        r.setAttribute('class', (w.conf || 0) < LOW_WORD_CONF ? 'w low' : 'w');
+        r.setAttribute('class', w.bc ? 'w bc' : (w.conf || 0) < LOW_WORD_CONF ? 'w low' : 'w');
       }
       frag.appendChild(r);
     });
@@ -506,10 +539,12 @@ export class FieldPicker {
         const hits = [];
         this.words.forEach((w, i) => {
           const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
-          if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) hits.push(i);
+          if (!w.hidden && cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) hits.push(i);
         });
+        // Si el recuadro coge texto, se ignoran los códigos de barras (evita duplicar el dato).
+        const textHits = hits.filter((i) => !this.words[i].bc);
         this.renderOverlay();
-        this.toggleWords(hits);
+        this.toggleWords(textHits.length ? textHits : hits);
       } else {
         const i = this.hitTest(g.start.x, g.start.y, 12 * g.start.scale);
         if (i >= 0) this.toggleWords([i]);
@@ -531,7 +566,11 @@ export class FieldPicker {
   hitTest(x, y, tol) {
     let best = -1;
     let bestD = Infinity;
+    // Dentro de un código de barras, gana el código.
+    const inBc = this.words.findIndex((w) => w.bc && x >= w.x0 && x <= w.x1 && y >= w.y0 && y <= w.y1);
+    if (inBc >= 0) return inBc;
     this.words.forEach((w, i) => {
+      if (w.hidden) return;
       const dx = x < w.x0 ? w.x0 - x : x > w.x1 ? x - w.x1 : 0;
       const dy = y < w.y0 ? w.y0 - y : y > w.y1 ? y - w.y1 : 0;
       const dist = Math.hypot(dx, dy);

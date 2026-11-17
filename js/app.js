@@ -5,10 +5,10 @@ import { Camera } from './camera.js';
 import * as ocr from './ocr.js';
 import { FieldPicker, colorFor, validateFieldName } from './fields.js';
 import { FIELD_TYPES, guessType } from './fieldtypes.js';
-import { refineWords } from './refine.js';
+import { readField } from './refine.js';
 import { grayStretch, sharpness, rotateCanvas } from './preprocess.js';
 
-const APP_VERSION = '2.1.0-dev';
+const APP_VERSION = '2.2.0-dev';
 const SOURCE_SIDE = 3000; // lado largo máximo de la imagen original guardada para releer campos
 const PSM_BY_DOC = { etiqueta: '11', documento: '3' }; // texto disperso / página normal
 const MAX_RENDERED = 400;
@@ -96,8 +96,11 @@ const picker = new FieldPicker({
 }, {
   getFields: () => state.settings.fields,
   getType: (f) => fieldType(f),
-  refine: (field, indices) => refineWords(els.ocrPreviewImg, els.ocrPreviewImg.naturalWidth, picker.width, picker.words, indices,
-    { type: fieldType(field), lang: state.settings.lang }),
+  refine: (field, indices) => readField({
+    source: els.ocrPreviewImg, sourceW: els.ocrPreviewImg.naturalWidth, ocrW: picker.width,
+    words: picker.words, indices, type: fieldType(field), lang: state.settings.lang,
+    barcodes: picker.words.filter((w) => w.bc),
+  }),
   toast: (m) => toast(m, { ms: 3500 }),
   requestAddField: () => addFieldFlow(),
   onDone: () => els.edSave.focus(),
@@ -549,11 +552,11 @@ function getBarcodeWorker() {
   if (barcodeWorker) return barcodeWorker;
   barcodeWorker = new Worker(new URL('./barcode-worker.js', import.meta.url));
   barcodeWorker.onmessage = (ev) => {
-    const { id, result, error } = ev.data || {};
+    const { id, result, error, barcodes } = ev.data || {};
     if (stillRequests.has(id)) {
       const cb = stillRequests.get(id);
       stillRequests.delete(id);
-      cb(error ? null : result);
+      cb(barcodes !== undefined ? barcodes : error ? null : result);
       return;
     }
     scanPending = false;
@@ -733,6 +736,12 @@ async function runOcr(sourceCanvas) {
     try { await els.ocrPreviewImg.decode(); } catch { /* se usará cuando cargue */ }
     picker.load({ imgUrl: previewUrl, width, height, words: res.words });
     if (!res.words.length) toast('No se reconoció texto. Acércate más, con buena luz y sin reflejos.', { ms: 4500 });
+    // Códigos de barras de la etiqueta: se pueden tocar y sirven para verificar el texto.
+    locateBarcodes(source, width).then((bcs) => {
+      if (token !== ocrToken || !bcs.length) return;
+      picker.setBarcodes(bcs);
+      toast(`${bcs.length} ${bcs.length === 1 ? 'código de barras encontrado' : 'códigos de barras encontrados'}: se usan para verificar los datos.`, { ms: 3500 });
+    });
   } catch (err) {
     if (token !== ocrToken) return;
     console.error(err);
@@ -744,6 +753,26 @@ async function runOcr(sourceCanvas) {
   } finally {
     ocr.releaseCanvas(det);
     ocr.releaseCanvas(source);
+  }
+}
+
+// Busca todos los códigos de barras de la imagen (en el worker). Las cajas se devuelven en
+// coordenadas de la imagen de detección (ancho detW). Lee los píxeles de inmediato (el canvas se libera después).
+function locateBarcodes(canvas, detW) {
+  try {
+    const c = ocr.downscale(canvas, canvas.width, canvas.height, 2000);
+    const img = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+    const k = detW / c.width;
+    ocr.releaseCanvas(c);
+    const w = getBarcodeWorker();
+    const id = ++scanReqId;
+    return new Promise((resolve) => {
+      stillRequests.set(id, (res) => resolve((res || []).map((b) => ({ ...b, x0: b.x0 * k, y0: b.y0 * k, x1: b.x1 * k, y1: b.y1 * k }))));
+      w.postMessage({ id, locate: true, width: img.width, height: img.height, buffer: img.data.buffer }, [img.data.buffer]);
+    });
+  } catch (err) {
+    console.warn('códigos', err);
+    return Promise.resolve([]);
   }
 }
 

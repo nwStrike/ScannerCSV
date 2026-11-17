@@ -27,6 +27,8 @@ Pensado sobre todo para **etiquetas de cajas** (letra pequeña, poco contraste, 
 - **Detección**: la imagen se endereza si está torcida, se pasa a grises con contraste estirado, se amplía si es pequeña y se analiza en modo «texto disperso» (Ajustes › Tipo de texto: Etiquetas/Documentos).
 - **Relectura de precisión**: al asignar palabras a un campo, ese trozo se vuelve a leer desde la imagen original con varias ampliaciones y dos preprocesados (contraste y blanco/negro adaptativo), en modo «una línea». Gana la lectura con más confianza (con un extra si varias coinciden).
 - **Tipos de campo** (Texto, Número, Fecha, Código/lote): limitan los caracteres posibles y corrigen confusiones típicas (O→0, l→1, S→5, B→8 en números y fechas). Se proponen solos por el nombre del campo.
+- **Códigos de barras de la etiqueta**: al analizar una foto de texto se localizan todos los códigos de barras (también varios apilados, como en las etiquetas de portátiles) y el QR/Data Matrix. Aparecen con recuadro azul y se pueden tocar para usar su valor. Además, si el texto leído de un campo se parece a un código cercano, se toma el valor exacto del código (sin prefijos tipo «S», «1S», «31P») y el campo se marca con ✓.
+- **Palabras cortadas**: si la detección deja fuera parte de una palabra, la relectura la alarga mientras haya tinta en la línea; las cajas anómalas (demasiado altas) se ajustan a su línea.
 - **Avisos**: las palabras poco fiables se marcan con borde discontinuo naranja y los valores dudosos con ⚠.
 
 Lo que más mejora el resultado: acercarse para que la letra se vea grande, buena luz sin reflejos y la etiqueta lo más plana y recta posible.
@@ -89,6 +91,7 @@ js/fields.js            selección de campos sobre la imagen del OCR
 js/refine.js            relectura de precisión de cada campo
 js/preprocess.js        preprocesado de imagen (contraste, umbral adaptativo, nitidez, giro)
 js/fieldtypes.js        tipos de campo y correcciones
+js/barcodematch.js      verificación del texto con los códigos de barras de la etiqueta
 js/csv.js               generación y exportación del CSV
 js/db.js                IndexedDB y almacenamiento persistente
 sw.js                   service worker (sin conexión)

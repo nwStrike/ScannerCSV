@@ -1,5 +1,5 @@
 /* Service worker de ScannerCSV: app shell en caché + caché en tiempo de ejecución del motor OCR. */
-const VERSION = 'v2.1.0-dev';
+const VERSION = 'v2.2.0-dev';
 const SHELL_CACHE = `scannercsv-shell-${VERSION}`;
 const RUNTIME_CACHE = 'scannercsv-runtime-v1';
 
@@ -16,6 +16,7 @@ const SHELL = [
   'js/fieldtypes.js',
   'js/refine.js',
   'js/preprocess.js',
+  'js/barcodematch.js',
   'js/barcode-worker.js',
   'vendor/zxing/zxing.min.js',
   'vendor/tesseract/tesseract.min.js',
