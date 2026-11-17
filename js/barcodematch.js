@@ -62,12 +62,12 @@ export function matchBarcode(text, box, barcodes) {
     const overlapX = Math.min(b.x1, box.x1) - Math.max(b.x0, box.x0) > -h;
     const gap = b.y0 >= box.y1 ? b.y0 - box.y1 : box.y0 >= b.y1 ? box.y0 - b.y1 : 0;
     const near = overlapX && gap < h * 4;
-    const limit = near ? 0.5 : 0.25;
+    const limit = near ? 0.4 : 0.2;
     if (v.rel <= limit && (!best || v.rel < best.rel || (v.rel === best.rel && near && !best.near))) {
       best = { value: v.value, rel: v.rel, near, exact: v.d === 0 };
     }
   }
-  return best ? { value: keepFormat(text, best.value), exact: best.exact } : null;
+  return best ? { value: keepFormat(text, best.value), exact: best.exact, rel: best.rel } : null;
 }
 
 // Conserva los separadores del texto impreso («390798D2-61BC-…») si el código los omite.

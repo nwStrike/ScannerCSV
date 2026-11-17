@@ -4,7 +4,7 @@
 import * as ocr from './ocr.js';
 import { grayStretch, adaptiveBinarize, cropScaled, cloneCanvas, meanLuma, invert } from './preprocess.js';
 import { cleanValue, tessParams } from './fieldtypes.js';
-import { matchBarcode } from './barcodematch.js';
+import { matchBarcode, lev } from './barcodematch.js';
 
 const TARGETS = [42, 30, 56]; // alturas de palabra (px) que se prueban en el recorte
 const MAX_SIDE = 1600;
@@ -54,41 +54,109 @@ export async function refineWords(source, sourceW, ocrW, allWords, indices, { ty
   padL = Math.max(1, padL); padR = Math.max(1, padR); padT = Math.max(1, padT); padB = Math.max(1, padB);
 
   const srcH = (source.naturalHeight || source.height);
-  const rect = { x: Math.max(0, (x0 - padL) * k), y: Math.max(0, (y0 - padT) * k) };
-  rect.w = Math.min(sourceW - rect.x, (x1 - x0 + padL + padR) * k);
-  rect.h = Math.min(srcH - rect.y, (y1 - y0 + padT + padB) * k);
+  const makeRect = (pt, pb) => {
+    const r = { x: Math.max(0, (x0 - padL) * k), y: Math.max(0, (y0 - pt) * k) };
+    r.w = Math.min(sourceW - r.x, (x1 - x0 + padL + padR) * k);
+    r.h = Math.min(srcH - r.y, (y1 - y0 + pt + pb) * k);
+    return r;
+  };
+  const rect = makeRect(padT, padB);
   if (rect.w < 2 || rect.h < 2) return null;
+  // Dos márgenes verticales (normal y ajustado): la lectura de Tesseract cambia mucho con unos pocos
+  // píxeles de la línea de encima o de debajo; con ambos, las lecturas que coinciden son más fiables.
+  const tightT = Math.min(padT, hAvg * 0.18), tightB = Math.min(padB, hAvg * 0.18);
+  const rects = [['', rect]];
+  if (padT - tightT > 1 || padB - tightB > 1) rects.push(['·ajustado', makeRect(tightT, tightB)]);
 
   const params = tessParams(type, singleLine);
   const candidates = [];
-  // Lectura de la detección inicial como candidata (a veces es la buena).
+  // Lectura inicial (la de la detección): es la referencia y solo se sustituye con pruebas claras.
   const plainText = cleanValue(type, trimEdges(words.map((w) => w.text).join(' '), type));
   const plainConf = words.reduce((acc, w) => acc + (w.conf || 0), 0) / words.length;
   const extended = ext.x0 < Math.min(...words.map((w) => w.x0)) - hAvg * 0.3 || ext.x1 > Math.max(...words.map((w) => w.x1)) + hAvg * 0.3;
-  if (plainText) candidates.push({ text: plainText, conf: extended ? plainConf * 0.6 : plainConf, src: 'detección' });
+  const initial = plainText ? { text: plainText, conf: plainConf, votes: 1, src: 'detección' } : null;
 
   // Varias escalas × dos preprocesados; cada recorte es pequeño (decenas de ms).
+  outer:
   for (const target of TARGETS) {
-    let scale = target / Math.max(1, hAvg * k);
-    scale = Math.min(4, Math.max(0.5, scale));
-    scale = Math.min(scale, MAX_SIDE / rect.w, MAX_SIDE / rect.h);
-    const base = grayStretch(cropScaled(source, rect, scale, 24));
-    if (meanLuma(base) < 110) invert(base); // texto claro sobre fondo oscuro
-    const bin = adaptiveBinarize(cloneCanvas(base));
-    for (const [canvas, name] of [[base, 'gris'], [bin, 'b/n']]) {
-      const r = await ocr.recognizeRegion(canvas, lang, params);
-      const text = cleanValue(type, trimEdges(r.text, type));
-      if (text) candidates.push({ text, conf: r.conf, src: `${name}@${target}` });
+    for (const [tag, rc] of rects) {
+      let scale = target / Math.max(1, hAvg * k);
+      scale = Math.min(4, Math.max(0.5, scale));
+      scale = Math.min(scale, MAX_SIDE / rc.w, MAX_SIDE / rc.h);
+      const base = grayStretch(cropScaled(source, rc, scale, 24));
+      if (meanLuma(base) < 110) invert(base); // texto claro sobre fondo oscuro
+      const bin = adaptiveBinarize(cloneCanvas(base));
+      for (const [canvas, name] of [[base, 'gris'], [bin, 'b/n']]) {
+        const r = await ocr.recognizeRegion(canvas, lang, params);
+        const text = cleanValue(type, trimEdges(r.text, type));
+        if (text) candidates.push({ text, conf: r.conf, src: `${name}@${target}${tag}` });
+      }
+      base.width = base.height = 0;
+      bin.width = bin.height = 0;
+      // Si ya hay una lectura muy segura y repetida, no hace falta seguir.
+      const top = pickBest(candidates);
+      if (top && top.conf >= GOOD_CONF && top.votes >= 2) break outer;
     }
-    base.width = base.height = 0;
-    bin.width = bin.height = 0;
-    // Si ya hay una lectura muy segura y repetida, no hace falta seguir.
-    const top = pickBest(candidates);
-    if (top && top.conf >= GOOD_CONF && top.votes >= 2) break;
   }
-  const best = pickBest(candidates);
+  const sure = words.filter((w) => (w.conf || 0) >= SURE_CONF).map((w) => cleanValue(type, trimEdges(w.text, type)));
+  const unsure = words.some((w) => (w.conf || 0) < SURE_CONF);
+  const best = decide(initial, pickBest(candidates), { extended, sure, unsure });
   if (!best) return null;
   return { text: best.text, conf: Math.min(100, best.conf), votes: best.votes, src: best.src };
+}
+
+const N = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const SURE_CONF = 70; // confianza de palabra a partir de la cual la lectura inicial se da por buena
+
+// ¿Contiene `text` todas las palabras `parts` en orden? (admite 1 error en palabras de 8+ caracteres)
+function containsInOrder(text, parts) {
+  const t = N(text);
+  let from = 0;
+  for (const p of parts) {
+    const w = N(p);
+    if (!w) continue;
+    const tol = w.length >= 8 ? 1 : 0;
+    let found = -1;
+    for (let i = from; i + w.length <= t.length; i++) {
+      let d = 0;
+      for (let j = 0; j < w.length && d <= tol; j++) if (t[i + j] !== w[j]) d++;
+      if (d <= tol) { found = i; break; }
+    }
+    if (found < 0) return false;
+    from = found + w.length;
+  }
+  return true;
+}
+
+// ¿Es `longer` la misma lectura que `shorter` pero completada (le faltaba un trozo al principio o al final)?
+function isCompletion(shorter, longer) {
+  const a = N(shorter), b = N(longer);
+  if (b.length <= a.length || a.length < 3) return false;
+  const tol = a.length >= 8 ? 1 : 0;
+  return lev(b.slice(0, a.length), a) <= tol || lev(b.slice(b.length - a.length), a) <= tol;
+}
+
+// Elige entre la lectura inicial y la mejor relectura. Principio: la comprobación puede sustituir
+// lo que la primera lectura leyó con dudas, nunca lo que leyó con seguridad. La relectura gana si:
+//  · completa una palabra que la detección cortó (y hubo tinta de más), o
+//  · conserva todas las palabras seguras de la inicial y solo cambia/añade las dudosas, o
+//  · es parecida a la inicial (corrige pocos caracteres) y varias relecturas coinciden con más
+//    confianza, o la inicial era muy dudosa.
+function decide(initial, refined, { extended = false, sure = [], unsure = false } = {}) {
+  if (!initial) return refined;
+  if (!refined) return initial;
+  if (refined.text === initial.text) {
+    return { ...initial, conf: Math.max(initial.conf, refined.conf), votes: refined.votes + 1 };
+  }
+  if (extended && refined.conf >= 60 && isCompletion(initial.text, refined.text)) return refined;
+  if ((unsure || extended) && sure.length && refined.conf >= 60 && (refined.votes >= 2 || refined.conf >= 80)
+      && containsInOrder(refined.text, sure) && N(refined.text).length >= N(sure.join('')).length) return refined;
+  const a = N(initial.text), b = N(refined.text);
+  const rel = lev(a, b) / Math.max(1, a.length, b.length);
+  if (rel > 0.34) return initial;
+  const strong = refined.votes >= 2 && refined.conf >= initial.conf + 8;
+  const weakInitial = initial.conf < 55 && refined.conf >= initial.conf + 20;
+  return strong || weakInitial ? refined : initial;
 }
 
 // Tesseract a veces da a una palabra una caja mucho más alta de lo real (abarca la línea de encima).
@@ -207,12 +275,21 @@ export async function readField({ source, sourceW, ocrW, words, indices, type = 
     x1: Math.max(...sel.map((w) => w.x1)), y1: Math.max(...sel.map((w) => w.y1)),
   };
   const plain = sel.map((w) => w.text).join(' ');
-  let m = matchBarcode(plain, box, barcodes);
-  if (m) return { text: m.value, conf: 99, src: 'barcode' };
+  // Primero se relee (así una palabra cortada se completa) y después se contrasta con los códigos.
   const r = await refineWords(source, sourceW, ocrW, words, indices, { type, lang });
-  if (r && r.text) {
-    m = matchBarcode(r.text, box, barcodes);
-    if (m) return { text: m.value, conf: 99, src: 'barcode' };
+  const reads = [];
+  if (r && r.text) reads.push({ text: r.text, conf: r.conf });
+  if (!r || N(r.text) !== N(plain)) reads.push({ text: plain, conf: sel.reduce((a, w) => a + (w.conf || 0), 0) / sel.length });
+  let best = null;
+  for (const rd of reads) {
+    const m = matchBarcode(rd.text, box, barcodes);
+    if (!m) continue;
+    // El código no puede «borrar» caracteres que el OCR sí vio (sería otro dato, p. ej. otro código cercano).
+    if (N(m.value).length < N(rd.text).length) continue;
+    // Si el OCR estaba muy seguro de un texto claramente distinto, no se corrige.
+    if (rd.conf >= 90 && m.rel > 0.2) continue;
+    if (!best || m.rel < best.rel || (m.rel === best.rel && N(rd.text).length > best.len)) best = { ...m, len: N(rd.text).length };
   }
+  if (best) return { text: best.value, conf: 99, src: 'barcode' };
   return r;
 }

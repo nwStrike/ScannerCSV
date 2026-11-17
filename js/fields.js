@@ -102,8 +102,8 @@ export class FieldPicker {
     // «Palabras» que el OCR inventa sobre las barras: se ocultan (no se pintan ni se pueden tocar).
     text.forEach((w, i) => {
       const cx = (w.x0 + w.x1) / 2, cy = (w.y0 + w.y1) / 2;
-      w.hidden = bcs.some((b) => cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1);
-      if (w.hidden) this.assign.delete(i);
+      // Una palabra que el usuario ya eligió nunca se oculta ni pierde su asignación.
+      w.hidden = !this.assign.has(i) && bcs.some((b) => cx >= b.x0 && cx <= b.x1 && cy >= b.y0 && cy <= b.y1);
     });
     // Las palabras de texto conservan sus índices (los códigos van al final).
     this.words = text.concat(bcs);
